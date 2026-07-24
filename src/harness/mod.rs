@@ -612,6 +612,25 @@ fn auth_kind(material: &crate::company::mcp::AuthMaterial) -> u8 {
     }
 }
 
+/// A stable fingerprint of a skill-delta set (issue #41), used to detect a
+/// console-authored custom skill add/edit/enable-toggle between
+/// [`HarnessPool::ensure`] calls. Hashes each delta's id, enabled flag, source,
+/// and custom-doc body so every operator change invalidates the cached roster.
+fn skill_fingerprint(deltas: &[SkillState]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    deltas.len().hash(&mut hasher);
+    for delta in deltas {
+        delta.slug.hash(&mut hasher);
+        delta.enabled.hash(&mut hasher);
+        (delta.source as u8).hash(&mut hasher);
+        delta.custom_doc.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// A stable fingerprint of an overlay-agent set (issue #71), used to detect a
 /// teammate add/remove/edit between [`HarnessPool::ensure`] calls. Mirrors
 /// [`mcp_fingerprint`]'s shape; no secrets are involved here so there is
@@ -1551,6 +1570,43 @@ description = "Builds the product."
         // A third ensure with no further change is a no-op (fingerprint stable).
         pool.ensure(&rec, &deps).await.expect("third ensure");
         assert_eq!(pool.overlay_fingerprint_of(&rec.id).await, Some(after));
+    }
+
+    /// The skill-delta fingerprint is stable for identical deltas and changes when
+    /// a delta is added, edited, enabled, or disabled.
+    #[test]
+    fn skill_fingerprint_is_stable_and_detects_changes() {
+        use crate::ports::skills_state::{SkillSource, SkillState};
+
+        let delta = SkillState {
+            slug: "invoicing".into(),
+            enabled: true,
+            source: SkillSource::Custom,
+            custom_doc: Some(
+                "---\nname: Invoicing\ndescription: Draft invoices\n---\n\n# Invoicing\n".into(),
+            ),
+        };
+
+        let fp1 = skill_fingerprint(&[delta.clone()]);
+        let fp2 = skill_fingerprint(&[delta.clone()]);
+        assert_eq!(fp1, fp2, "identical deltas produce identical fingerprints");
+
+        // Changing the custom_doc changes the fingerprint.
+        let mut edited = delta.clone();
+        edited.custom_doc =
+            Some("---\nname: Invoicing v2\ndescription: Better\n---\n\n# Invoicing v2\n".into());
+        let fp3 = skill_fingerprint(&[edited]);
+        assert_ne!(fp1, fp3, "editing custom_doc changes the fingerprint");
+
+        // Toggling enabled changes the fingerprint.
+        let mut disabled = delta.clone();
+        disabled.enabled = false;
+        let fp4 = skill_fingerprint(&[disabled]);
+        assert_ne!(fp1, fp4, "disabling a skill changes the fingerprint");
+
+        // Removing a delta changes the fingerprint.
+        let fp5 = skill_fingerprint(&[]);
+        assert_ne!(fp1, fp5, "removing a skill changes the fingerprint");
     }
 
     /// A fresh pool has no skill fingerprint for any company.
