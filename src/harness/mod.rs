@@ -336,6 +336,12 @@ pub struct HarnessPool {
     /// whenever an operator- or orchestrator-added teammate is added/removed,
     /// mirroring the MCP-freshness fingerprint above.
     overlay_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the operator skill deltas the cached roster was built
+    /// from, keyed by company. Drives skill-delta freshness (issue #41):
+    /// [`ensure`](Self::ensure) rebuilds the roster whenever a console-authored
+    /// custom skill is added/edited/removed between calls, so new skills reach
+    /// the embedded agent on the next turn without a restart.
+    skill_fingerprints: RwLock<HashMap<CompanyId, u64>>,
 }
 
 impl Default for HarnessPool {
@@ -351,6 +357,7 @@ impl HarnessPool {
             agents: RwLock::new(HashMap::new()),
             mcp_fingerprints: RwLock::new(HashMap::new()),
             overlay_fingerprints: RwLock::new(HashMap::new()),
+            skill_fingerprints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -476,6 +483,13 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn overlay_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.overlay_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current skill-delta fingerprint for a company (test-only), mirroring
+    /// [`Self::mcp_fingerprint_of`].
+    #[cfg(test)]
+    pub async fn skill_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.skill_fingerprints.read().await.get(company).copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -1537,5 +1551,15 @@ description = "Builds the product."
         // A third ensure with no further change is a no-op (fingerprint stable).
         pool.ensure(&rec, &deps).await.expect("third ensure");
         assert_eq!(pool.overlay_fingerprint_of(&rec.id).await, Some(after));
+    }
+
+    /// A fresh pool has no skill fingerprint for any company.
+    #[tokio::test]
+    async fn skill_fingerprint_of_returns_none_for_unknown_company() {
+        let pool = HarnessPool::new();
+        assert_eq!(
+            pool.skill_fingerprint_of(&CompanyId::new("acme")).await,
+            None
+        );
     }
 }
