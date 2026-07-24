@@ -388,25 +388,30 @@ impl HarnessPool {
         let overlay_agents = self.resolve_effective_overlay(company, deps).await;
         let overlay_fp = overlay_fingerprint(&overlay_agents);
 
+        // Fetch the operator skill deltas and compute their fingerprint (issue
+        // #41 — skill-delta freshness). The deltas are fetched before the
+        // fast-path check so a console-authored custom skill change invalidates
+        // the cached roster on the very next `ensure` — no restart required.
+        let skill_deltas = match &deps.skills {
+            Some(store) => store.list(&company.id).await?,
+            None => Vec::new(),
+        };
+        let skill_fp = skill_fingerprint(&skill_deltas);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
+            let skill_fingerprints = self.skill_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
+                && skill_fingerprints.get(&company.id) == Some(&skill_fp)
             {
                 return Ok(());
             }
         }
 
-        // Fetch the operator skill deltas once (async) before building the
-        // roster; `build_roster`/`build_agent` stay synchronous and fold the
-        // deltas into each agent's effective skill set.
-        let skill_deltas = match &deps.skills {
-            Some(store) => store.list(&company.id).await?,
-            None => Vec::new(),
-        };
         // Fold the freshly-resolved MCP set into the deps the roster is built
         // from, so a changed set actually reaches the rebuilt agents. The clone
         // shares every Arc / queue handle — only `mcp_servers` is overridden.
@@ -429,6 +434,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), overlay_fp);
+        self.skill_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), skill_fp);
         Ok(())
     }
 
@@ -1617,5 +1626,174 @@ description = "Builds the product."
             pool.skill_fingerprint_of(&CompanyId::new("acme")).await,
             None
         );
+    }
+
+    // --- Skill-delta freshness (issue #41) ------------------------------------
+
+    /// In-memory skill-delta store so `ensure` can re-resolve the live deltas.
+    #[derive(Default)]
+    struct MemSkills {
+        deltas: StdMutex<Vec<SkillState>>,
+    }
+
+    #[async_trait]
+    impl SkillStateStore for MemSkills {
+        async fn list(&self, _company: &CompanyId) -> crate::Result<Vec<SkillState>> {
+            Ok(self.deltas.lock().unwrap().clone())
+        }
+        async fn set(&self, _company: &CompanyId, state: &SkillState) -> crate::Result<()> {
+            let mut guard = self.deltas.lock().unwrap();
+            guard.retain(|d| d.slug != state.slug);
+            guard.push(state.clone());
+            Ok(())
+        }
+        async fn remove(&self, _company: &CompanyId, slug: &str) -> crate::Result<bool> {
+            let mut guard = self.deltas.lock().unwrap();
+            let before = guard.len();
+            guard.retain(|d| d.slug != slug);
+            Ok(guard.len() < before)
+        }
+    }
+
+    /// A console-authored custom skill added between two `ensure` calls triggers
+    /// a rebuild and reaches the agent without a restart (issue #41).
+    #[tokio::test]
+    async fn ensure_rebuilds_when_a_skill_delta_is_added() {
+        let skills: Arc<dyn SkillStateStore> = Arc::new(MemSkills::default());
+        let dir = tempfile::tempdir().unwrap();
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: Some(skills.clone()),
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: None,
+        };
+        let pool = HarnessPool::new();
+        let rec = record();
+
+        // First ensure: no deltas yet.
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let before = pool
+            .skill_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_eq!(pool.resident_companies().await, 1);
+
+        // Console-add a custom skill directly into the live skill store.
+        let custom_doc = "---\nname: Invoicing\ndescription: Draft invoices\n---\n\n\
+                          # Invoicing\n\nBODY-MARKER\n";
+        skills
+            .set(
+                &rec.id,
+                &SkillState {
+                    slug: "invoicing".into(),
+                    enabled: true,
+                    source: crate::ports::skills_state::SkillSource::Custom,
+                    custom_doc: Some(custom_doc.into()),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Next ensure re-fetches deltas → fingerprint changes → roster rebuilt.
+        pool.ensure(&rec, &deps).await.expect("second ensure");
+        let after = pool
+            .skill_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            before, after,
+            "adding a skill delta must change the skill fingerprint"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "same company, rebuilt in place"
+        );
+
+        // The skill should reach the agent (its catalogue surfaces the skill).
+        let reply = pool
+            .run(&rec.id, "ceo", "list skills", &deps)
+            .await
+            .expect("turn runs")
+            .reply;
+        assert!(
+            reply.contains("BODY-MARKER"),
+            "the late-authored skill must reach the agent on the next turn: {reply:?}"
+        );
+    }
+
+    /// Unchanged skill deltas reuse the cached roster (no rebuild).
+    #[tokio::test]
+    async fn ensure_skips_rebuild_when_skill_deltas_are_unchanged() {
+        use crate::ports::skills_state::SkillSource;
+
+        let skills: Arc<dyn SkillStateStore> = Arc::new(MemSkills::default());
+        // Pre-seed one delta.
+        skills
+            .set(
+                &CompanyId::new("acme"),
+                &SkillState {
+                    slug: "research".into(),
+                    enabled: true,
+                    source: SkillSource::Custom,
+                    custom_doc: Some(
+                        "---\nname: Research\ndescription: Research things\n---\n\n# Research\n"
+                            .into(),
+                    ),
+                },
+            )
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(MockContext::default()),
+            store: Arc::new(RecordingStore::default()),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: Some(skills),
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            secrets: None,
+        };
+        let pool = HarnessPool::new();
+        let rec = record();
+
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let fp1 = pool
+            .skill_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted after first ensure");
+
+        // Second ensure with no delta change: fingerprint stable, no rebuild.
+        pool.ensure(&rec, &deps).await.expect("second ensure");
+        let fp2 = pool
+            .skill_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted after second ensure");
+        assert_eq!(fp1, fp2, "unchanged deltas must yield the same fingerprint");
+        assert_eq!(pool.resident_companies().await, 1);
     }
 }
