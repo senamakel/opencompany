@@ -736,6 +736,14 @@ fn skill_fingerprint(deltas: &[SkillState]) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
+    let mut deltas = deltas.iter().collect::<Vec<_>>();
+    deltas.sort_by(|left, right| {
+        left.slug
+            .cmp(&right.slug)
+            .then_with(|| left.enabled.cmp(&right.enabled))
+            .then_with(|| (left.source as u8).cmp(&(right.source as u8)))
+            .then_with(|| left.custom_doc.cmp(&right.custom_doc))
+    });
     deltas.len().hash(&mut hasher);
     for delta in deltas {
         delta.slug.hash(&mut hasher);
@@ -796,6 +804,14 @@ fn overlay_fingerprint(agents: &[OverlayAgent]) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
+    let mut agents = agents.iter().collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.role.cmp(&right.role))
+            .then_with(|| left.description.cmp(&right.description))
+    });
     agents.len().hash(&mut hasher);
     for agent in agents {
         agent.id.hash(&mut hasher);
@@ -1905,6 +1921,28 @@ description = "Sets direction."
 
     // --- Skill-delta freshness (issue #41) ------------------------------------
 
+    #[test]
+    fn overlay_fingerprint_is_independent_of_store_order() {
+        let first = OverlayAgent {
+            id: "designer".into(),
+            name: "Designer".into(),
+            role: "Product Designer".into(),
+            description: Some("Designs the product.".into()),
+        };
+        let second = OverlayAgent {
+            id: "engineer".into(),
+            name: "Engineer".into(),
+            role: "Software Engineer".into(),
+            description: Some("Builds the product.".into()),
+        };
+
+        assert_eq!(
+            overlay_fingerprint(&[first.clone(), second.clone()]),
+            overlay_fingerprint(&[second, first]),
+            "the fingerprint must not depend on store iteration order"
+        );
+    }
+
     /// The skill-delta fingerprint is stable for identical deltas and changes when
     /// a delta is added, edited, enabled, or disabled.
     #[test]
@@ -1940,6 +1978,18 @@ description = "Sets direction."
         // Removing a delta changes the fingerprint.
         let fp5 = skill_fingerprint(&[]);
         assert_ne!(fp1, fp5, "removing a skill changes the fingerprint");
+
+        let other = SkillState {
+            slug: "research".into(),
+            enabled: true,
+            source: SkillSource::Custom,
+            custom_doc: Some("# Research".into()),
+        };
+        assert_eq!(
+            skill_fingerprint(&[delta.clone(), other.clone()]),
+            skill_fingerprint(&[other, delta]),
+            "the fingerprint must not depend on store iteration order"
+        );
     }
 
     /// A fresh pool has no skill fingerprint for any company.
@@ -2003,6 +2053,10 @@ description = "Sets direction."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
+            media: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -2101,6 +2155,10 @@ description = "Sets direction."
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
             secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            plan: None,
+            media: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
