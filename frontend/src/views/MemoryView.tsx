@@ -3,12 +3,15 @@ import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
+  CONTEXT_ORIGINS,
   createMemory,
   deleteMemory,
   KIND_STYLES,
   listMemory,
   MEMORY_KINDS,
   memoryStats,
+  ORIGIN_LABELS,
+  ORIGIN_STYLES,
   type MemoryEntry,
   type MemoryKind,
   type MemoryStats,
@@ -51,6 +54,34 @@ const KIND_LABELS: Record<string, string> = {
   person: "People",
   project: "Projects",
   reference: "References",
+};
+
+/**
+ * The value the type filter matches a row on: a fact matches on its `kind`, a
+ * read-only context row matches on its `origin` (agent-memory / task-outcome).
+ * Keeps the original per-kind filtering while extending it to the new sources.
+ */
+function entryType(e: MemoryEntry): string {
+  return e.origin === "fact" ? (e.kind ?? "fact") : e.origin;
+}
+
+/** The badge label + style for a row, from its kind (facts) or origin (context). */
+function entryBadge(e: MemoryEntry): { label: string; style: string } {
+  if (e.origin === "fact") {
+    const kind = e.kind ?? "fact";
+    return { label: kind, style: KIND_STYLES[kind] };
+  }
+  return { label: ORIGIN_LABELS[e.origin], style: ORIGIN_STYLES[e.origin] };
+}
+
+/** The type-filter options in display order: fact kinds, then context origins. */
+const TYPE_FILTERS: string[] = [...MEMORY_KINDS, ...CONTEXT_ORIGINS];
+
+/** Labels for every type-filter value (including `all`), for the Select. */
+const TYPE_FILTER_LABELS: Record<string, string> = {
+  all: "All types",
+  ...Object.fromEntries(MEMORY_KINDS.map((k) => [k, KIND_LABELS[k]])),
+  ...Object.fromEntries(CONTEXT_ORIGINS.map((o) => [o, ORIGIN_LABELS[o]])),
 };
 
 /** Formats an epoch-millis instant as a short absolute date, or a dash when 0. */
@@ -116,13 +147,18 @@ export function MemoryView({ client, company }: Props) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries
-      .filter((e) => kind === "all" || e.kind === kind)
+      .filter((e) => kind === "all" || entryType(e) === kind)
       .filter((e) => !q || e.title.toLowerCase().includes(q) || e.body.toLowerCase().includes(q));
   }, [entries, query, kind]);
 
-  const perKind = useMemo(() => {
+  // Per-type counts for the health badges, keyed by the same value the filter
+  // matches on (fact kind or context origin) so every source shows a count.
+  const perType = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const e of entries) counts[e.kind] = (counts[e.kind] ?? 0) + 1;
+    for (const e of entries) {
+      const t = entryType(e);
+      counts[t] = (counts[t] ?? 0) + 1;
+    }
     return counts;
   }, [entries]);
 
@@ -167,7 +203,7 @@ export function MemoryView({ client, company }: Props) {
           </Alert>
         )}
 
-        <HealthStrip loading={loading} stats={stats} total={entries.length} perKind={perKind} />
+        <HealthStrip loading={loading} stats={stats} total={entries.length} perType={perType} />
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 sm:max-w-xs">
@@ -179,15 +215,15 @@ export function MemoryView({ client, company }: Props) {
               className="pl-8"
             />
           </div>
-          <Select value={kind} onValueChange={(v) => v && setKind(v)} items={KIND_LABELS}>
+          <Select value={kind} onValueChange={(v) => v && setKind(v)} items={TYPE_FILTER_LABELS}>
             <SelectTrigger className="w-40">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All types</SelectItem>
-              {MEMORY_KINDS.map((k) => (
-                <SelectItem key={k} value={k}>
-                  {KIND_LABELS[k]}
+              {TYPE_FILTERS.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {TYPE_FILTER_LABELS[t]}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -219,12 +255,12 @@ function HealthStrip({
   loading,
   stats,
   total,
-  perKind,
+  perType,
 }: {
   loading: boolean;
   stats: MemoryStats | null;
   total: number;
-  perKind: Record<string, number>;
+  perType: Record<string, number>;
 }) {
   if (loading && !stats) {
     return <Skeleton className="h-16 rounded-xl" />;
@@ -245,9 +281,14 @@ function HealthStrip({
           </div>
         ))}
         <div className="flex flex-wrap items-center gap-1.5">
-          {MEMORY_KINDS.filter((k) => perKind[k]).map((k) => (
+          {MEMORY_KINDS.filter((k) => perType[k]).map((k) => (
             <Badge key={k} variant="outline" className={cn("capitalize", KIND_STYLES[k])}>
-              {k} · {perKind[k]}
+              {k} · {perType[k]}
+            </Badge>
+          ))}
+          {CONTEXT_ORIGINS.filter((o) => perType[o]).map((o) => (
+            <Badge key={o} variant="outline" className={ORIGIN_STYLES[o]}>
+              {ORIGIN_LABELS[o]} · {perType[o]}
             </Badge>
           ))}
         </div>
@@ -257,27 +298,32 @@ function HealthStrip({
 }
 
 function MemoryCard({ entry, onDelete }: { entry: MemoryEntry; onDelete: () => void }) {
+  const badge = entryBadge(entry);
   return (
     <Card className="group" data-testid="memory-card">
       <CardContent className="space-y-2 py-4">
         <div className="flex items-start justify-between gap-2">
           <p className="font-medium leading-snug">{entry.title}</p>
-          <Badge variant="outline" className={cn("shrink-0 capitalize", KIND_STYLES[entry.kind])}>
-            {entry.kind}
+          <Badge variant="outline" className={cn("shrink-0 capitalize", badge.style)}>
+            {badge.label}
           </Badge>
         </div>
         {entry.body && <p className="text-sm text-muted-foreground">{entry.body}</p>}
         <div className="flex items-center justify-between pt-1">
           <span className="text-xs text-muted-foreground">via {entry.source}</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
-            onClick={onDelete}
-            aria-label="Delete memory"
-          >
-            <Trash2 className="size-4" />
-          </Button>
+          {/* Delete is only offered on operator facts; agent memory and task
+              outcomes are read-only, so they show no delete affordance. */}
+          {entry.editable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive"
+              onClick={onDelete}
+              aria-label="Delete memory"
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>

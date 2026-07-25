@@ -15,6 +15,7 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
+pub mod capabilities;
 pub mod channels;
 pub mod domain;
 pub mod inbox;
@@ -135,6 +136,7 @@ impl std::fmt::Debug for ConnectionsRuntime {
 /// Builds the `ops` route fragment, merged into the main router.
 pub fn router() -> Router<AppState> {
     let router = Router::new()
+        .merge(capabilities::router())
         .merge(channels::router())
         .merge(domain::router())
         .merge(smtp::router())

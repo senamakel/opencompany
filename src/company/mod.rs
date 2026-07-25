@@ -11,6 +11,11 @@ pub mod dns;
 pub mod inference;
 mod manifest;
 pub mod mcp;
+// Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
+// per-tenant browser sign-in flow. Needs the vendored `oh::mcp_client` discovery
+// primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.
+#[cfg(feature = "mcp")]
+pub mod mcp_oauth;
 pub mod runtime;
 mod skill_file;
 pub mod telegram;
@@ -24,8 +29,9 @@ pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md};
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, Connection,
-    DEFAULT_ALWAYS_APPROVE, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS,
-    McpServer, POLICY_MODES, Place, Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools,
+    DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference,
+    KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy,
+    Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_media_explicit,
 };
 pub use workflow_file::{
     WORKFLOW_NODE_KINDS, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef, WorkflowNodeKind,

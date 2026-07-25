@@ -54,6 +54,40 @@ pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &["payment.send", "filing.submit", "
 /// Priorities a company may assign to a prioritized `[[connection]]`.
 pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 
+/// The exec tool-grant namespaces a capability [`Plan`] can budget (issue #108).
+///
+/// This is the canonical, always-compiled source of truth for "which tool
+/// families are gateable"; the harness re-exports it as
+/// [`GATEABLE_NAMESPACES`](crate::harness::toolbelt::GATEABLE_NAMESPACES) and
+/// maps individual tools onto these namespaces. A `[plan].token_budgets` key
+/// outside this set is a manifest error. Lives here (not the feature-gated
+/// harness) so manifest validation can see it in the default build.
+pub const GATEABLE_NAMESPACES: [&str; 5] = ["shell", "code", "web", "subagent", "media"];
+
+/// Whether a tool-grant list **explicitly** grants the real-money `media`
+/// namespace (issue #109).
+///
+/// Unlike the ordinary namespace match, the catch-all `*` does **not** grant
+/// `media`: a capability that spends real money on image/video generation must
+/// be opted into by name, never ridden in on a wildcard. Matches the bare
+/// `media` grant or any `media.*` sub-grant. Lives here (always compiled) so
+/// both the feature-gated harness wiring (`build::build_agent`) and the
+/// always-compiled console capability route key off one source of truth.
+pub fn grants_media_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "media" || grant.starts_with("media."))
+}
+
+/// Built-in capability tier names selectable in `[plan].name` (issue #108). The
+/// name → budget-map table lives in
+/// [`plan_named`](crate::harness::capability_budget::plan_named); this list is
+/// what manifest validation checks a name against.
+pub const PLAN_NAMES: [&str; 4] = ["free", "starter", "pro", "unlimited"];
+
+/// Budget windows selectable in `[plan].period` (issue #108).
+pub const PLAN_PERIODS: [&str; 2] = ["daily", "monthly"];
+
 /// The on-disk definition of a Company.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompanyManifest {
@@ -108,6 +142,13 @@ pub struct CompanyManifest {
     /// Hard spend ceiling.
     #[serde(default)]
     pub budget: Budget,
+    /// Per-tenant capability tier plan (issue #108) — a token budget per exec
+    /// tool namespace, gating the `shell`/`code`/`web`/`subagent` families by the
+    /// company's period token spend. Absent (the default) leaves gating off. This
+    /// is a distinct axis from `[policy].mode` (autonomy) and an agent's `tier`
+    /// (cognition) — a plan bounds *cost of capability*, not trust or model.
+    #[serde(default)]
+    pub plan: Plan,
     /// Cron-driven prompts. Renamed from the `[[schedule]]` array-of-tables.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<Schedule>,
@@ -362,6 +403,13 @@ pub struct Tools {
     /// Company-wide grant globs; agents intersect with this.
     #[serde(default)]
     pub allow: Vec<String>,
+    /// SSRF allowlist for the `web` tool namespace (Cell A). Empty (default) is
+    /// *open mode* — all public hosts allowed — while private/loopback/
+    /// link-local/metadata IPs are always rejected by OpenHuman's `url_guard`.
+    /// A non-empty list is strict (only those hosts + subdomains); `"*"` is an
+    /// explicit allow-all-public wildcard.
+    #[serde(default)]
+    pub web_allowed_domains: Vec<String>,
 }
 
 impl Default for Tools {
@@ -369,6 +417,7 @@ impl Default for Tools {
         Self {
             provider: default_tool_provider(),
             allow: Vec::new(),
+            web_allowed_domains: Vec::new(),
         }
     }
 }
@@ -443,6 +492,62 @@ pub struct Budget {
     pub monthly_usd: Option<f64>,
 }
 
+/// `[plan]` — the company's capability tier plan (issue #108).
+///
+/// Declarative intent shaped like the other manifest sections: an optional
+/// built-in tier `name` (`free` / `starter` / `pro` / `unlimited`), the budget
+/// `period` (`daily` — the default — or `monthly`), and an explicit
+/// `token_budgets` table mapping an exec tool namespace (`shell` / `code` /
+/// `web` / `subagent`) to the tokens it may burn per period. The named tier
+/// supplies a base map; `token_budgets` overrides/extends it. A namespace absent
+/// from the effective map is denied outright — the map's key set *is* the
+/// company's capability set. An absent `[plan]` leaves gating off entirely.
+///
+/// The budget is a **threshold over the company's total period token spend**, not
+/// a per-namespace meter (usage samples carry no per-tool attribution): when
+/// spend reaches a tier's budget, that tier's tools switch off. See
+/// [`CapabilityPlan`](crate::harness::capability_budget::CapabilityPlan).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Plan {
+    /// Built-in tier name, or `None` for a bare `token_budgets`-only plan.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Budget window — `daily` (default) or `monthly`.
+    #[serde(default = "default_plan_period")]
+    pub period: String,
+    /// Exec-namespace → tokens allowed per period. Overrides/extends the named
+    /// tier's map; a gateable namespace absent here is denied.
+    #[serde(default)]
+    pub token_budgets: BTreeMap<String, u64>,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        // A manual impl (not `#[derive(Default)]`) so an absent `[plan]` section —
+        // which `#[serde(default)]` fills via `Plan::default()`, NOT the per-field
+        // `default_plan_period` — still carries the `daily` window, matching the
+        // key-present-but-missing case. `is_set()` stays false regardless.
+        Self {
+            name: None,
+            period: default_plan_period(),
+            token_budgets: BTreeMap::new(),
+        }
+    }
+}
+
+impl Plan {
+    /// Whether this section meaningfully configures a plan — a named tier or an
+    /// explicit budget. An absent `[plan]` deserializes to the default (period
+    /// only), which is *not* set, so gating stays off.
+    pub fn is_set(&self) -> bool {
+        self.name.as_deref().is_some_and(|n| !n.trim().is_empty()) || !self.token_budgets.is_empty()
+    }
+}
+
+fn default_plan_period() -> String {
+    "daily".to_string()
+}
+
 /// A `[[schedule]]` entry; becomes a `ScheduleFired` event.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schedule {
@@ -455,6 +560,23 @@ pub struct Schedule {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Real-money `media` (issue #109) is granted ONLY by an explicit `media` /
+    /// `media.*` grant — never by the catch-all `*`. This wildcard exclusion is
+    /// the security property that keeps a broadly-permissioned company from
+    /// accidentally handing its agents a paid image/video generator.
+    #[test]
+    fn media_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_media_explicit(&["media".into()]));
+        assert!(grants_media_explicit(&["media.image".into()]));
+        assert!(grants_media_explicit(&["web.*".into(), "media".into()]));
+        // The catch-all `*` must NOT grant media.
+        assert!(!grants_media_explicit(&["*".into()]));
+        assert!(!grants_media_explicit(&["web.*".into()]));
+        assert!(!grants_media_explicit(&[]));
+        // A substring match ("mediation") must not count as the media namespace.
+        assert!(!grants_media_explicit(&["mediation".into()]));
+    }
 
     // Guards the newly-added `Serialize` derive: a manifest with renamed
     // `[[agent]]`/`[[schedule]]` arrays must survive a serialize→deserialize
@@ -495,5 +617,38 @@ mod test {
         let value = serde_json::to_value(&manifest).unwrap();
         assert!(value.get("agent").is_some());
         assert!(value.get("schedule").is_some());
+    }
+
+    /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct
+    /// round-trip, and an absent section deserializes to the not-set default.
+    #[test]
+    fn plan_section_round_trips_and_defaults() {
+        let toml_src = r#"
+            [company]
+            name = "Acme"
+
+            [plan]
+            name = "starter"
+            period = "monthly"
+
+            [plan.token_budgets]
+            web = 500000
+        "#;
+        let manifest: CompanyManifest = toml::from_str(toml_src).expect("parse toml");
+        assert!(manifest.plan.is_set());
+        assert_eq!(manifest.plan.name.as_deref(), Some("starter"));
+        assert_eq!(manifest.plan.period, "monthly");
+        assert_eq!(manifest.plan.token_budgets.get("web"), Some(&500_000));
+
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        let back: CompanyManifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.plan.name.as_deref(), Some("starter"));
+        assert_eq!(back.plan.period, "monthly");
+        assert_eq!(back.plan.token_budgets.get("web"), Some(&500_000));
+
+        // An absent `[plan]` defaults to period-only, which is NOT set.
+        let bare: CompanyManifest = toml::from_str("[company]\nname = \"Bare\"\n").unwrap();
+        assert!(!bare.plan.is_set());
+        assert_eq!(bare.plan.period, "daily");
     }
 }

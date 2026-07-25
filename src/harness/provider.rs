@@ -78,6 +78,42 @@ pub fn harness_inference_from_env(
     ))
 }
 
+/// Default media-generation backend base URL when only a bare
+/// `TINYHUMANS_API_KEY` is supplied — the OpenHuman backend that owns the GMI
+/// provider keys, billing, and rate limiting for image/video generation.
+pub const DEFAULT_TINYHUMANS_MEDIA_BACKEND_URL: &str = "https://api.tinyhumans.ai";
+
+/// Resolve the MANAGED media-generation backend (issue #109) from the
+/// environment, or `None` when no managed credential is present (fail-closed —
+/// no credential ⇒ no media tools are ever wired).
+///
+/// Precedence, most specific first:
+///
+/// * token — `OPENCOMPANY_MEDIA_KEY`, else `TINYHUMANS_API_KEY`. **No token ⇒
+///   `None`.** This is the platform's own managed credential; the tenant
+///   identity the backend bills is derived server-side from it.
+/// * url — `OPENCOMPANY_MEDIA_BACKEND_URL`, else
+///   [`DEFAULT_TINYHUMANS_MEDIA_BACKEND_URL`].
+///
+/// **Security**: this deliberately consults ONLY the environment — never a
+/// tenant secret store — so media generation can only ever run on the managed
+/// platform credential, never a company-controlled BYOK key. Mirrors
+/// [`harness_inference_from_env`]'s two-name precedence so a per-platform media
+/// override (`OPENCOMPANY_MEDIA_KEY`) stays distinct from the shared
+/// `TINYHUMANS_API_KEY`.
+pub fn media_backend_from_env(env: &dyn EnvSource) -> Option<super::toolbelt::MediaBackend> {
+    let auth_token = env
+        .get("OPENCOMPANY_MEDIA_KEY")
+        .or_else(|| env.get("TINYHUMANS_API_KEY"))?;
+    let backend_url = env
+        .get("OPENCOMPANY_MEDIA_BACKEND_URL")
+        .unwrap_or_else(|| DEFAULT_TINYHUMANS_MEDIA_BACKEND_URL.to_string());
+    Some(super::toolbelt::MediaBackend {
+        backend_url,
+        auth_token,
+    })
+}
+
 /// Deterministic offline [`Provider`] for tests and offline harness wiring.
 ///
 /// Every call returns a canned reply built from a fixed prefix and the last
@@ -634,6 +670,38 @@ mod tests {
     fn env_config_is_none_without_any_key() {
         let env = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", "https://x/v1")]);
         assert!(harness_inference_from_env(&env).is_none());
+    }
+
+    // ---- media backend (issue #109) ---------------------------------------
+
+    #[test]
+    fn media_backend_prefers_specific_key_and_defaults_url() {
+        let env = MapEnv::new([("OPENCOMPANY_MEDIA_KEY", "media-specific")]);
+        let backend = media_backend_from_env(&env).expect("configured");
+        assert_eq!(backend.auth_token, "media-specific");
+        assert_eq!(backend.backend_url, DEFAULT_TINYHUMANS_MEDIA_BACKEND_URL);
+    }
+
+    #[test]
+    fn media_backend_falls_back_to_tinyhumans_key_and_honors_url_override() {
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "platform-key"),
+            (
+                "OPENCOMPANY_MEDIA_BACKEND_URL",
+                "https://staging-api.tinyhumans.ai",
+            ),
+        ]);
+        let backend = media_backend_from_env(&env).expect("configured");
+        assert_eq!(backend.auth_token, "platform-key");
+        assert_eq!(backend.backend_url, "https://staging-api.tinyhumans.ai");
+    }
+
+    /// Fail-closed: no managed credential ⇒ no media backend, even when a URL is
+    /// set. A tenant BYOK inference key must never stand in for the media token.
+    #[test]
+    fn media_backend_is_none_without_managed_key() {
+        let env = MapEnv::new([("OPENCOMPANY_MEDIA_BACKEND_URL", "https://api.tinyhumans.ai")]);
+        assert!(media_backend_from_env(&env).is_none());
     }
 
     #[tokio::test]

@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         ledger: Vec::new(),
         lifecycle: "running".to_string(),
         overlay_agents: Vec::new(),
+        overlay_desk_members: Vec::new(),
     };
 
     let dir = tempfile::tempdir()?;
@@ -109,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
         workflow_runner: opencompany::harness::orchestrator::WorkflowRunnerHandle::default(),
         mcp_failures: opencompany::harness::mcp_probe::McpFailureQueue::default(),
         secrets: None,
+        web_allowed_domains: Vec::new(),
+        capabilities: opencompany::harness::toolbelt::CapabilityFilter::AllowAll,
+        plan: None,
+        media: None,
     };
 
     let pool = HarnessPool::new();

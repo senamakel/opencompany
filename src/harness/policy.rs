@@ -193,6 +193,14 @@ fn is_external_effect(tool_name: &str) -> bool {
     if tool_name.eq_ignore_ascii_case("mcp_registry_tool_call") {
         return true;
     }
+    // The media catalog is a read-only GET (issue #109): listing models spends
+    // nothing and must never park for approval, even though its name does not
+    // start with a read-only prefix. The `media_generate_*` tools are NOT listed
+    // here — they spend real money and fall through to the external-effect
+    // default, so they park under supervised / deny under readonly.
+    if tool_name.eq_ignore_ascii_case("media_list_models") {
+        return false;
+    }
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",
@@ -215,6 +223,11 @@ fn classify_group(tool_name: &str) -> EffectGroup {
     let name = tool_name.to_ascii_lowercase();
     if name == "mcp_registry_tool_call" {
         EffectGroup::Other
+    } else if name.starts_with("media_generate") {
+        // Image/video generation is billed by the backend on submit (issue
+        // #109), so it is a spend effect — parked for approval before money
+        // moves. (`media_list_models` is read-only and never reaches here.)
+        EffectGroup::Spend
     } else if name.contains("pay") || name.contains("transfer") || name.starts_with("spend") {
         EffectGroup::Spend
     } else if name.contains("email") || name.contains("send") || name.contains("message") {
@@ -344,6 +357,66 @@ mod tests {
             .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+    }
+
+    /// Media generation (issue #109): the paid `media_generate_*` tools park
+    /// under supervised and deny under readonly (external spend effect), while
+    /// the read-only `media_list_models` catalog GET is always allowed.
+    #[tokio::test]
+    async fn media_generate_parks_supervised_and_denies_readonly_but_list_is_read_only() {
+        let supervised = policy("supervised", &[], None);
+        for tool in ["media_generate_image", "media_generate_video"] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
+        // The catalog GET is read-only — allowed even under supervised.
+        assert_eq!(
+            supervised
+                .check(&request("media_list_models", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+
+        let readonly = policy("readonly", &[], None);
+        assert!(
+            matches!(
+                readonly
+                    .check(&request("media_generate_image", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "media_generate must be denied under readonly"
+        );
+        // Even a read-only desk can list the model catalog.
+        assert_eq!(
+            readonly
+                .check(&request("media_list_models", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
+    /// Paid generation classifies as a spend effect (issue #109).
+    #[test]
+    fn media_generate_classifies_as_spend() {
+        let p = policy("supervised", &[], None);
+        assert_eq!(
+            p.effect_for("media_generate_image", &serde_json::json!({}))
+                .group,
+            EffectGroup::Spend
+        );
+        assert_eq!(
+            p.effect_for("media_generate_video", &serde_json::json!({}))
+                .group,
+            EffectGroup::Spend
+        );
     }
 
     #[test]

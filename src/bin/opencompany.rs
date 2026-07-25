@@ -300,9 +300,16 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
 fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::app::config::ProcessEnv;
     use opencompany::harness::HarnessPool;
-    use opencompany::harness::provider::harness_inference_from_env;
+    use opencompany::harness::provider::{harness_inference_from_env, media_backend_from_env};
 
     let builder = builder.with_harness(Arc::new(HarnessPool::new()));
+    // Issue #109: the MANAGED media-generation backend, resolved from the
+    // environment only (never a tenant secret). Absent ⇒ media tools stay unwired
+    // even for a company that grants `media` (fail-closed).
+    let builder = match media_backend_from_env(&ProcessEnv) {
+        Some(media_backend) => builder.with_media_backend(media_backend),
+        None => builder,
+    };
     // The managed env default is an *optional*, lowest-precedence source; a
     // BYOK-only tenant supplies none and still gets a harness brain from its
     // manifest/runtime config.

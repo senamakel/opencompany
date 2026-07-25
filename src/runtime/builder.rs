@@ -188,6 +188,12 @@ pub struct RuntimeBuilder {
     /// per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider).
     #[cfg(feature = "openhuman")]
     harness_inference: Option<(HostedProviderConfig, Option<String>)>,
+    /// Issue #109: the MANAGED media-generation backend (env-resolved platform
+    /// credential + URL). `None` fails closed — no image/video tools are wired.
+    /// Threaded onto every harness-built agent's [`HarnessDeps`], but only
+    /// consumed when a company **explicitly** grants the `media` namespace.
+    #[cfg(feature = "openhuman")]
+    media_backend: Option<crate::harness::toolbelt::MediaBackend>,
 }
 
 impl RuntimeBuilder {
@@ -237,6 +243,8 @@ impl RuntimeBuilder {
             harness: None,
             #[cfg(feature = "openhuman")]
             harness_inference: None,
+            #[cfg(feature = "openhuman")]
+            media_backend: None,
         }
     }
 
@@ -486,6 +494,22 @@ impl RuntimeBuilder {
         model_override: Option<String>,
     ) -> Self {
         self.harness_inference = Some((config, model_override));
+        self
+    }
+
+    /// Issue #109: sets the MANAGED media-generation backend (platform
+    /// credential + URL, resolved from the environment via
+    /// [`media_backend_from_env`](crate::harness::provider::media_backend_from_env)).
+    /// This is the ONLY path media generation is ever fed a credential — never a
+    /// tenant secret — so a company can generate media only on the managed
+    /// platform account. Absent (the default), media tools are never wired even
+    /// for a company that grants `media`. Feature-gated.
+    #[cfg(feature = "openhuman")]
+    pub fn with_media_backend(
+        mut self,
+        media_backend: crate::harness::toolbelt::MediaBackend,
+    ) -> Self {
+        self.media_backend = Some(media_backend);
         self
     }
 
@@ -818,6 +842,30 @@ impl RuntimeBuilder {
                                 // snapshot frozen here at boot.
                                 mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
                                 secrets: Some(secrets.clone()),
+                                // Cell A: the `web` toolbelt SSRF allowlist.
+                                // Domains come straight from the manifest.
+                                web_allowed_domains: self
+                                    .manifest
+                                    .tools
+                                    .web_allowed_domains
+                                    .clone(),
+                                // Issue #108: `capabilities` is the no-plan
+                                // fallback (identity). When `[plan]` is set,
+                                // `HarnessPool::ensure` resolves the per-tenant
+                                // filter from the meter each turn and overwrites
+                                // it; `plan` carries the resolved budget so it can.
+                                capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                                plan:
+                                    crate::harness::capability_budget::CapabilityPlan::from_manifest(
+                                        &self.manifest.plan,
+                                    ),
+                                // Issue #109: the MANAGED media-generation
+                                // backend, resolved from the environment by the
+                                // CLI (`attach_harness` → `media_backend_from_env`)
+                                // and never from a tenant secret. `None` fails
+                                // closed — `build_agent` wires no media tools even
+                                // for a company that grants `media`.
+                                media: self.media_backend.clone(),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),

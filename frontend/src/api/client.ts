@@ -18,6 +18,7 @@ import {
   type ApiErrorBody,
   type AppSpec,
   type ApprovalSummary,
+  type CapabilityStatusDto,
   type ChatHistoryMessageDto,
   type ChatResponse,
   type CompanyStatus,
@@ -141,6 +142,15 @@ export class OpenCompanyClient {
   /** One company's status. Uses the single-company alias when unscoped. */
   status(company?: string | null): Promise<CompanyStatus> {
     return this.request<CompanyStatus>("GET", `${this.scope(company)}`);
+  }
+
+  /**
+   * The company's capability-budget status (issue #108): the effective tier plan
+   * and per-tier token spend. Hosts without the surface (or with no `[plan]`)
+   * return `{ configured: false }`; callers render a "no plan configured" note.
+   */
+  capabilityStatus(company?: string | null): Promise<CapabilityStatusDto> {
+    return this.request<CapabilityStatusDto>("GET", `${this.scope(company)}/capabilities`);
   }
 
   /**

@@ -9,15 +9,27 @@ import type { OpenCompanyClient } from "./client";
 /** The taxonomy of a durable fact — mirrors the host's `FactKind`. */
 export type MemoryKind = "fact" | "preference" | "person" | "project" | "reference";
 
-/** One durable memory entry as the host returns it. */
+/**
+ * Where a memory row came from — the host's `MemoryOrigin` discriminator.
+ * `fact` rows are operator-authored (editable/deletable); `agent-memory` and
+ * `task-outcome` rows are the agents' own runtime memory and are read-only.
+ */
+export type MemoryOrigin = "fact" | "agent-memory" | "task-outcome";
+
+/** One memory row as the host returns it (an operator fact OR an agent chunk). */
 export interface MemoryEntry {
   id: string;
-  kind: MemoryKind;
+  /** The fact taxonomy — present only on `fact` rows (omitted for context). */
+  kind?: MemoryKind;
+  /** Which backend the row came from; drives editable-vs-read-only rendering. */
+  origin: MemoryOrigin;
+  /** Whether the operator may delete this row (true only for `fact` rows). */
+  editable: boolean;
   title: string;
   body: string;
-  /** Which desk/teammate captured it. */
+  /** Which desk/teammate/agent captured it. */
   source: string;
-  /** Epoch-millis of the last update. */
+  /** Epoch-millis of the last update (`0` for context rows, which carry none). */
   updatedAt: number;
 }
 
@@ -54,6 +66,22 @@ export const KIND_STYLES: Record<MemoryKind, string> = {
   person: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
   project: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
   reference: "border-border bg-muted text-muted-foreground",
+};
+
+/** The read-only context origins, in display order (facts filter by kind). */
+export const CONTEXT_ORIGINS: Exclude<MemoryOrigin, "fact">[] = ["agent-memory", "task-outcome"];
+
+/** Human labels for each origin, for badges and the type filter. */
+export const ORIGIN_LABELS: Record<MemoryOrigin, string> = {
+  fact: "Fact",
+  "agent-memory": "Agent memory",
+  "task-outcome": "Task outcome",
+};
+
+/** Per-origin badge styling for the read-only context rows. */
+export const ORIGIN_STYLES: Record<Exclude<MemoryOrigin, "fact">, string> = {
+  "agent-memory": "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  "task-outcome": "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400",
 };
 
 /** The company's durable facts, newest-first, optionally filtered server-side. */

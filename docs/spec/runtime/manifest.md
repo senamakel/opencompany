@@ -81,6 +81,11 @@ skills = [
 [budget]
 monthly_usd = 200.0                # hard cap: inference + x402 combined
 
+[plan]                             # capability tier gating (issue #108)
+name = "starter"                   # free | starter | pro | unlimited (optional)
+period = "daily"                   # daily (default) | monthly
+token_budgets = { web = 500000 }   # override/extend the named tier per namespace
+
 [[schedule]]
 cron = "0 9 * * MON"
 prompt = "Weekly review and operator digest"
@@ -120,6 +125,38 @@ prompt = "Weekly review and operator digest"
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
   inference usage and x402 spend; reaching it pauses the company with an
   operator notification rather than silently degrading.
+- **`[plan]`** (issue #108) gates the exec tool families (`shell`, `code`,
+  `web`, `subagent`) by the company's **token spend this period**, a distinct
+  axis from `[policy].mode` (autonomy) and an agent's `tier` (cognition). A
+  built-in `name` (`free` / `starter` / `pro` / `unlimited`) supplies a base
+  budget map; `token_budgets` overrides/extends it per namespace. The map's key
+  set **is** the capability set — a gateable namespace absent from it is denied
+  outright. Each budget is a **threshold over total period token spend**, not a
+  per-namespace meter (usage samples carry no per-tool attribution): when spend
+  reaches a tier's budget, that tier's tools switch off for the rest of the
+  period; different budgets give **graduated degradation**. `period` is `daily`
+  (default) or `monthly`, aligned to UTC calendar boundaries. Gating is
+  **fail-closed** — if the usage meter can't be read, every gateable family is
+  denied (the turn still runs on its intrinsic memory/file/MCP tools). The gate
+  re-resolves before every turn, so a tier that crosses its budget mid-session
+  switches off on the **next** turn (a turn already in flight finishes). An
+  absent `[plan]` leaves gating off entirely. The console's Usage view shows a
+  live per-tier budget card (`GET …/capabilities`).
+  - **`media`** (issue #109) is a fifth gateable namespace covering the
+    image/video generation tools (`media_generate_image`,
+    `media_generate_video`, `media_list_models`), but it is **real-money and
+    opt-in**: it is granted only by an **explicit** `media` / `media.*` entry in
+    `[tools].allow` — the `*` wildcard deliberately does **not** grant it — and
+    it runs exclusively on a **managed platform credential** (resolved from the
+    environment, never a tenant BYOK key or secret). It is absent from the
+    `free` / `starter` / `pro` tiers (denied there) and uncapped only under
+    `unlimited`; a company opts in per-namespace with
+    `token_budgets = { media = N }`. Every generation additionally **parks for
+    operator approval** before the backend bills it, and the whole family is
+    compiled out unless the build enables the `media` feature. With no managed
+    credential configured, a `media` grant wires no tools (fail-closed). The
+    Usage view surfaces a dedicated media status row (active / awaiting
+    credential / not granted / not in this build).
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
   standard 5-field.
 

@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{OpenCompanyError, Result};
 
 use super::types::{
-    BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, KNOWN_CHANNELS, POLICY_MODES, TIERS,
-    TOOL_PROVIDERS,
+    BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES, KNOWN_CHANNELS,
+    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS, TOOL_PROVIDERS,
 };
 
 /// Preferred manifest filename.
@@ -274,6 +274,28 @@ impl CompanyManifest {
             ));
         }
 
+        // `[plan]` — capability tier gating (issue #108). Only checked when the
+        // section is set; an absent `[plan]` leaves gating off and is always ok.
+        if self.plan.is_set() {
+            if let Some(name) = self.plan.name.as_deref().map(str::trim)
+                && !name.is_empty()
+                && !PLAN_NAMES.contains(&name)
+            {
+                problems.push(one_of("`[plan].name`", &PLAN_NAMES, name));
+            }
+            if !PLAN_PERIODS.contains(&self.plan.period.as_str()) {
+                problems.push(one_of("`[plan].period`", &PLAN_PERIODS, &self.plan.period));
+            }
+            for namespace in self.plan.token_budgets.keys() {
+                if !GATEABLE_NAMESPACES.contains(&namespace.as_str()) {
+                    problems.push(format!(
+                        "`[plan].token_budgets` has an unknown tool namespace `{namespace}` — budget one of {}.",
+                        join_backticked(&GATEABLE_NAMESPACES)
+                    ));
+                }
+            }
+        }
+
         for (index, schedule) in self.schedules.iter().enumerate() {
             let fields = schedule.cron.split_whitespace().count();
             if fields != 5 {
@@ -425,6 +447,60 @@ mod tests {
         assert_eq!(
             manifest.policy.always_approve,
             vec!["payment.send", "filing.submit", "external.publish"]
+        );
+    }
+
+    #[test]
+    fn valid_plan_section_passes() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[plan]\nname = \"starter\"\nperiod = \"monthly\"\n[plan.token_budgets]\nweb = 500000\n",
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    #[test]
+    fn absent_plan_is_valid() {
+        // No `[plan]` → gating off; the default section must not trip validation.
+        let manifest = parse("[company]\nname = \"X\"\n");
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    #[test]
+    fn rejects_unknown_plan_name_in_prosumer_language() {
+        let manifest = parse("[company]\nname = \"X\"\n[plan]\nname = \"enterprise\"\n");
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("`[plan].name`")
+                && p.contains("free, starter, pro, unlimited")
+                && p.contains("enterprise")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_bad_plan_period() {
+        let manifest =
+            parse("[company]\nname = \"X\"\n[plan]\nname = \"free\"\nperiod = \"hourly\"\n");
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`[plan].period`") && p.contains("hourly")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_gateable_budget_namespace() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[plan]\nname = \"pro\"\n[plan.token_budgets]\ntelepathy = 100\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("telepathy") && p.contains("token_budgets")),
+            "{problems:?}"
         );
     }
 
