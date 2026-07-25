@@ -1027,7 +1027,7 @@ rl.on('line', (line) => {
         std::fs::write(&script, NODE_STUB).expect("write node stub");
         let runtime = McpRuntime::new(temp.path().join("workspace"));
         let server = InstalledServer {
-            server_id: uuid::Uuid::new_v4().to_string(),
+            server_id: crate::ports::generate_id(),
             qualified_name: "test-node-echo".to_string(),
             display_name: "Test Node Echo".to_string(),
             description: None,
