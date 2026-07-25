@@ -2101,15 +2101,22 @@ description = "Sets direction."
             "same company, rebuilt in place"
         );
 
-        // The skill should reach the agent (its catalogue surfaces the skill).
-        let reply = pool
-            .run(&rec.id, "ceo", "list skills", &deps)
-            .await
-            .expect("turn runs")
-            .reply;
+        // The rebuilt agent's materialized catalogue must contain the late-added
+        // skill. The offline MockProvider only echoes user messages, so its reply
+        // cannot be used to observe the system-prompt catalogue.
+        let materialized = std::fs::read_to_string(
+            dir.path()
+                .join("acme")
+                .join("ceo")
+                .join("skill-catalog")
+                .join("skills")
+                .join("invoicing")
+                .join("SKILL.md"),
+        )
+        .expect("late-added skill is materialized for the rebuilt agent");
         assert!(
-            reply.contains("BODY-MARKER"),
-            "the late-authored skill must reach the agent on the next turn: {reply:?}"
+            materialized.contains("BODY-MARKER"),
+            "the late-authored skill must reach the rebuilt agent: {materialized:?}"
         );
     }
 
