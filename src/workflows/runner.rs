@@ -966,7 +966,7 @@ async fn run_workflow_inner(
     let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        super::replay::outward_calls_performed(&graph, &outcome.output)
+        super::replay::outward_calls_performed(&graph, &outcome.output, workflow)
     };
     for call in &unreplayable {
         tracing::warn!(
@@ -2625,6 +2625,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),

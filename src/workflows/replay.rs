@@ -131,6 +131,7 @@
 use serde_json::{Value, json};
 use tinyflows::model::{NodeKind, WorkflowGraph};
 
+use crate::company::{WorkflowFile, WorkflowNodeKind};
 use crate::ports::bound_node_output;
 
 use crate::runtime::workflow_resume::{PerformedCall, performed_in_input};
@@ -227,13 +228,15 @@ impl UnreplayableCall {
 pub(crate) fn outward_calls_performed(
     graph: &WorkflowGraph,
     output: &Value,
+    authored: &WorkflowFile,
 ) -> (Vec<PerformedCall>, Vec<UnreplayableCall>) {
     let nodes = output.get("nodes");
     let mut performed = Vec::new();
     let mut unreplayable = Vec::new();
+    let declared = declared_unrepeatable(authored);
 
     for node in &graph.nodes {
-        let Some(slug) = outward_call_of(node) else {
+        let Some(slug) = outward_call_of(node, declared.contains(node.id.as_str())) else {
             continue;
         };
         // Not reached, or reached and produced nothing: there is nothing to
@@ -363,6 +366,32 @@ pub(crate) fn replay_performed(graph: &mut WorkflowGraph, trigger_input: &Value)
     replayed
 }
 
+/// The node ids whose author declared `repeatable = false` (issue #850).
+///
+/// Read off the **authored** file rather than the compiled graph, the same way
+/// [`deliver_outputs`](super::delivery::deliver_outputs) reads `destination`:
+/// this is host-side policy the engine never sees, so putting it in engine
+/// config would be an inert key riding into the graph.
+///
+/// Restricted to the two kinds that make a call, mirroring the validation that
+/// rejects the field anywhere else — so a graph loaded from an older or looser
+/// source cannot widen the guarded set through a kind the rewrite would not
+/// touch anyway.
+fn declared_unrepeatable(authored: &WorkflowFile) -> std::collections::HashSet<&str> {
+    authored
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.repeatable == Some(false)
+                && matches!(
+                    node.kind,
+                    WorkflowNodeKind::ToolCall | WorkflowNodeKind::HttpRequest
+                )
+        })
+        .map(|node| node.id.as_str())
+        .collect()
+}
+
 /// The name of the outward call a node makes — or `None` when the node makes no
 /// call, or makes one that reaches nobody outside the company.
 ///
@@ -373,7 +402,7 @@ pub(crate) fn replay_performed(graph: &mut WorkflowGraph, trigger_input: &Value)
 /// than an oversight: its own tool calls park through #395's drain and are
 /// decided one at a time, and its re-execution is the token cost #438 already
 /// priced and declined to fix here.
-fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
+fn outward_call_of(node: &tinyflows::model::Node, declared_unrepeatable: bool) -> Option<String> {
     match node.kind {
         NodeKind::ToolCall => {
             let slug = node.config.get("slug").and_then(Value::as_str)?;
@@ -382,6 +411,17 @@ fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
                 .get("args")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // The author said this call must not be made twice (issue #850).
+            // Read BEFORE the classifier, because the whole point is the calls
+            // the classifier cannot see: `shell` runs an arbitrary command and
+            // the host does not parse it, so no amount of inspection here will
+            // ever reach the right answer. Only the guarding direction is taken
+            // from the author — `repeatable = true` falls through to the
+            // classifier below rather than overriding it, so a declaration can
+            // never switch off a guard #846 already applies.
+            if declared_unrepeatable {
+                return Some(slug.to_string());
+            }
             let consequence = crate::policy::consequence_of(slug, &args);
             // The residual bucket — "no particular consequence to name on the
             // card" — is everything that stays inside the company plus the three
@@ -407,7 +447,12 @@ fn outward_call_of(node: &tinyflows::model::Node) -> Option<String> {
                 .and_then(Value::as_str)
                 .unwrap_or("GET")
                 .to_uppercase();
-            if SAFE_METHODS.contains(&method.as_str()) {
+            // A `GET` the author knows has a side effect — the method promises
+            // to have done nothing, and an endpoint is free to break that
+            // promise. Same one-way rule as the `tool_call` arm: the
+            // declaration adds this node to the guarded set and can never take
+            // a non-safe method out of it.
+            if SAFE_METHODS.contains(&method.as_str()) && !declared_unrepeatable {
                 return None;
             }
             Some(format!("http_request {method}"))
@@ -433,6 +478,46 @@ mod tests {
     use crate::ports::run_output::RUN_OUTPUT_MAX_BYTES;
     use crate::runtime::workflow_resume::CONTINUATION_PERFORMED_KEY;
     use tinyflows::model::Node;
+
+    use crate::company::{WorkflowEdgeDef, WorkflowNodeDef};
+
+    /// The authored file behind a test graph: one `WorkflowNodeDef` per
+    /// `(id, kind, repeatable)`, and nothing else set.
+    ///
+    /// Declared kinds matter — [`declared_unrepeatable`] filters on them, so a
+    /// test that passed the wrong kind would assert nothing.
+    fn authored(nodes: &[(&str, WorkflowNodeKind, Option<bool>)]) -> WorkflowFile {
+        WorkflowFile {
+            id: "wf".into(),
+            name: "wf".into(),
+            description: None,
+            nodes: nodes
+                .iter()
+                .map(|(id, kind, repeatable)| WorkflowNodeDef {
+                    id: (*id).to_string(),
+                    kind: *kind,
+                    name: String::new(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    repeatable: *repeatable,
+                    destination: None,
+                })
+                .collect(),
+            edges: Vec::<WorkflowEdgeDef>::new(),
+            global: false,
+        }
+    }
+
+    /// An authored file that declares nothing — the pre-#850 world, and the
+    /// shape every test written before this issue implicitly assumed.
+    fn undeclared() -> WorkflowFile {
+        authored(&[])
+    }
 
     fn node(id: &str, kind: NodeKind, config: Value) -> Node {
         Node {
@@ -472,8 +557,11 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, unreplayable) =
-            outward_calls_performed(&g, &settled("notify", json!({ "status": 201 })));
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("notify", json!({ "status": 201 })),
+            &undeclared(),
+        );
 
         assert_eq!(performed.len(), 1, "{performed:?}");
         assert_eq!(performed[0].node, "notify");
@@ -518,9 +606,159 @@ mod tests {
             output["nodes"][id] = settled(id, json!({ "ok": true }))["nodes"][id].clone();
         }
 
-        let (performed, unreplayable) = outward_calls_performed(&g, &output);
+        let (performed, unreplayable) = outward_calls_performed(&g, &output, &undeclared());
         assert!(performed.is_empty(), "{performed:?}");
         assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// `shell` is NOT recorded on its own (issue #850).
+    ///
+    /// The load-bearing negative. `shell` runs an arbitrary command the host
+    /// does not parse, so it is `EffectGroup::Other` and falls in the residual
+    /// bucket — and it must stay there. Replaying it by default would stop
+    /// every `shell` node that builds, lints or reads from re-running, to guard
+    /// the rare one that reached a counterparty. #846 declined that trade on
+    /// purpose; this test is what stops a later change making it silently.
+    #[test]
+    fn shell_is_not_recorded_without_a_declaration() {
+        let g = graph(vec![node(
+            "build",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "curl -X POST https://api.test/x" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("build", json!({ "stdout": "" })),
+            &undeclared(),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// `repeatable = false` puts a `shell` node in the guarded set (issue #850).
+    ///
+    /// The whole feature: the author states what the host cannot infer, and the
+    /// same recording path every classified call already travels picks it up.
+    #[test]
+    fn a_declared_shell_node_is_recorded() {
+        let g = graph(vec![node(
+            "publish",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "./bin/announce" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("publish", json!({ "stdout": "sent" })),
+            &authored(&[("publish", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+        assert_eq!(performed.len(), 1, "{performed:?}");
+        assert_eq!(performed[0].node, "publish");
+        assert_eq!(performed[0].tool, "shell");
+    }
+
+    /// A declaration only ever ADDS a guard.
+    ///
+    /// `repeatable = true` on a node the host already classifies as outward is
+    /// not a way to switch #846 off. The author is not more authoritative than
+    /// the consequence table about a call the table can see; the field exists
+    /// for the calls it cannot.
+    #[test]
+    fn repeatable_true_cannot_remove_a_guard() {
+        let g = graph(vec![node(
+            "notify",
+            NodeKind::HttpRequest,
+            json!({ "method": "POST", "url": "https://api.test/hooks" }),
+        )]);
+        let (performed, _) = outward_calls_performed(
+            &g,
+            &settled("notify", json!({ "status": 201 })),
+            &authored(&[("notify", WorkflowNodeKind::HttpRequest, Some(true))]),
+        );
+        assert_eq!(
+            performed.len(),
+            1,
+            "a declared-repeatable POST is still guarded"
+        );
+    }
+
+    /// A declaration on a `GET` guards it, because an endpoint is free to break
+    /// the promise the method makes.
+    #[test]
+    fn a_declared_get_is_recorded() {
+        let g = graph(vec![node(
+            "trip",
+            NodeKind::HttpRequest,
+            json!({ "method": "GET", "url": "https://api.test/fire" }),
+        )]);
+        let (performed, _) = outward_calls_performed(
+            &g,
+            &settled("trip", json!({ "status": 200 })),
+            &authored(&[("trip", WorkflowNodeKind::HttpRequest, Some(false))]),
+        );
+        assert_eq!(performed.len(), 1, "{performed:?}");
+    }
+
+    /// A declaration names a node id, and a stale one guards nothing.
+    ///
+    /// A graph edited between the pause and the approval can leave a
+    /// declaration naming a node that is gone. Silently guarding the wrong node
+    /// would be worse than guarding none, so the lookup is by id and misses.
+    #[test]
+    fn a_declaration_for_a_node_not_in_the_graph_guards_nothing() {
+        let g = graph(vec![node(
+            "build",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "make" } }),
+        )]);
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &settled("build", json!({ "stdout": "" })),
+            &authored(&[("gone", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert!(unreplayable.is_empty(), "{unreplayable:?}");
+    }
+
+    /// A declared node still obeys every limit `outward_calls_performed`
+    /// already enforces — here, the fan-out refusal.
+    ///
+    /// The declaration decides *whether the node is guarded*, never *how*. A
+    /// declared fan-out is still refused and surfaced, because one recorded
+    /// result cannot answer N invocations whoever asked for the guard.
+    #[test]
+    fn a_declared_fan_out_is_still_refused() {
+        let g = graph(vec![node(
+            "notify_each",
+            NodeKind::ToolCall,
+            json!({ "slug": "shell", "args": { "command": "./bin/announce" } }),
+        )]);
+        let output = json!({
+            "nodes": { "notify_each": { "items": [
+                { "raw": { "status": 201 } },
+                { "raw": { "status": 201 } }
+            ] } }
+        });
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &output,
+            &authored(&[("notify_each", WorkflowNodeKind::ToolCall, Some(false))]),
+        );
+        assert!(performed.is_empty(), "{performed:?}");
+        assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
+        assert_eq!(unreplayable[0].node_id, "notify_each");
+    }
+
+    /// A declaration on a kind that makes no call is ignored here as well as
+    /// rejected at validation.
+    ///
+    /// Validation is the place an author hears about it; this is the belt to
+    /// that braces, so a graph loaded from an older or looser source cannot
+    /// widen the guarded set through a kind the rewrite would not touch.
+    #[test]
+    fn a_declaration_on_a_non_calling_kind_is_ignored() {
+        let file = authored(&[("report", WorkflowNodeKind::Output, Some(false))]);
+        assert!(declared_unrepeatable(&file).is_empty());
     }
 
     /// A node the run never reached is not recorded — which is what makes
@@ -532,8 +770,11 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, unreplayable) =
-            outward_calls_performed(&g, &json!({ "nodes": { "notify": { "items": [] } } }));
+        let (performed, unreplayable) = outward_calls_performed(
+            &g,
+            &json!({ "nodes": { "notify": { "items": [] } } }),
+            &undeclared(),
+        );
         assert!(performed.is_empty(), "{performed:?}");
         assert!(unreplayable.is_empty(), "{unreplayable:?}");
     }
@@ -558,7 +799,7 @@ mod tests {
             ] } }
         });
 
-        let (performed, unreplayable) = outward_calls_performed(&g, &output);
+        let (performed, unreplayable) = outward_calls_performed(&g, &output, &undeclared());
         assert!(performed.is_empty(), "{performed:?}");
         assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
         assert_eq!(unreplayable[0].node_id, "notify_each");
@@ -582,7 +823,8 @@ mod tests {
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
         let huge = json!({ "body": "x".repeat(RUN_OUTPUT_MAX_BYTES + 1) });
-        let (performed, unreplayable) = outward_calls_performed(&g, &settled("notify", huge));
+        let (performed, unreplayable) =
+            outward_calls_performed(&g, &settled("notify", huge), &undeclared());
 
         assert!(performed.is_empty(), "{performed:?}");
         assert_eq!(unreplayable.len(), 1, "{unreplayable:?}");
@@ -684,7 +926,8 @@ mod tests {
             NodeKind::HttpRequest,
             json!({ "method": "POST", "url": "https://api.test/hooks" }),
         )]);
-        let (performed, _) = outward_calls_performed(&g, &settled("notify", hostile.clone()));
+        let (performed, _) =
+            outward_calls_performed(&g, &settled("notify", hostile.clone()), &undeclared());
         let input = json!({ CONTINUATION_PERFORMED_KEY: performed });
 
         replay_performed(&mut g, &input);
