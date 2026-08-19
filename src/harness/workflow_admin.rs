@@ -40,7 +40,8 @@
 //!
 //! An agent-authored graph is **manual-run only** — a deliberate, argued
 //! narrowing of the create schema (see `CreateWorkflowArgs`): `schedule`,
-//! `on_error`, `retry` and `requires_approval` are unattended-run policy an
+//! `on_error`, `retry`, `requires_approval` and `repeatable` are unattended-run
+//! policy an
 //! operator decides. Create can honour that by simply never emitting them.
 //! A full-replacement *edit* cannot: replaying a graph back through the narrow
 //! schema drops whatever policy the stored body carried, and dropping a
@@ -274,8 +275,9 @@ fn refuse_unexpressible_policy(
     };
     Some(format!(
         "Refused: workflow `{wid}` carries per-node run policy this tool can't write back — {}. \
-         Replacing the graph from here would silently drop it, and `requires_approval` in \
-         particular is an operator's approval gate.{tail}",
+         Replacing the graph from here would silently drop it — `requires_approval` is an \
+         operator's approval gate, and `repeatable` stops an approval sending the same thing \
+         twice.{tail}",
         projection.unexpressible_summary()
     ))
 }
@@ -354,7 +356,7 @@ impl Tool for ReadWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Read one saved workflow's full graph by id, in the exact shape `update_workflow` accepts, plus the `version` token that tool requires. USE FOR seeing what a workflow actually does before changing it, and to get the `expected_version` for an edit — always read before `update_workflow`. NOT for listing what workflows exist (use `query_company`) and NOT for running one (use `run_workflow`). The reply also says whether the workflow is `editable` (a workflow shipped in the company's source tree is not), whether its schedule is armed, and names any per-node run policy (`on_error`, `retry`, `requires_approval`) or trigger schedule that only the console can change."
+        "Read one saved workflow's full graph by id, in the exact shape `update_workflow` accepts, plus the `version` token that tool requires. USE FOR seeing what a workflow actually does before changing it, and to get the `expected_version` for an edit — always read before `update_workflow`. NOT for listing what workflows exist (use `query_company`) and NOT for running one (use `run_workflow`). The reply also says whether the workflow is `editable` (a workflow shipped in the company's source tree is not), whether its schedule is armed, and names any per-node run policy (`on_error`, `retry`, `requires_approval`, `repeatable`) or trigger schedule that only the console can change."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -506,6 +508,11 @@ fn seed_draft(file: &crate::company::WorkflowFile) -> RawWorkflow {
                 on_error: n.on_error.clone(),
                 retry: n.retry.clone(),
                 requires_approval: n.requires_approval,
+                // Carried, not dropped: this is a round trip of a stored graph,
+                // so losing a `repeatable = false` here would remove an
+                // operator's repeat guard (issue #850) as a side effect of an
+                // agent reading the workflow.
+                repeatable: n.repeatable,
                 destination: n.destination.clone(),
             })
             .collect(),
@@ -610,7 +617,7 @@ impl Tool for UpdateWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Replace a saved workflow's whole graph — use this to FIX a workflow that is wrong rather than creating a second one beside it. You must call `read_workflow` first: this is a full replacement (anything you leave out is gone), and `expected_version` is REQUIRED and only comes from that read. Send the same `{id, name, description, nodes, edges}` shape `create_workflow` takes, with `id` naming the workflow to replace. NOT for making a new workflow (use `create_workflow`), NOT for removing one (use `delete_workflow`), NOT for running one (use `run_workflow`). Workflows shipped in the company's source tree, workflows that run on a schedule, and workflows whose nodes carry run policy (`on_error`, `retry`, `requires_approval`) are refused here — those are the operator's to change in the console. If the workflow changed since you read it the edit is refused; read it again and reapply."
+        "Replace a saved workflow's whole graph — use this to FIX a workflow that is wrong rather than creating a second one beside it. You must call `read_workflow` first: this is a full replacement (anything you leave out is gone), and `expected_version` is REQUIRED and only comes from that read. Send the same `{id, name, description, nodes, edges}` shape `create_workflow` takes, with `id` naming the workflow to replace. NOT for making a new workflow (use `create_workflow`), NOT for removing one (use `delete_workflow`), NOT for running one (use `run_workflow`). Workflows shipped in the company's source tree, workflows that run on a schedule, and workflows whose nodes carry run policy (`on_error`, `retry`, `requires_approval`, `repeatable`) are refused here — those are the operator's to change in the console. If the workflow changed since you read it the edit is refused; read it again and reapply."
     }
 
     fn parameters_schema(&self) -> Value {

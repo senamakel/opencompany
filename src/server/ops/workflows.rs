@@ -593,6 +593,11 @@ struct CreateNode {
     /// When `true`, the node pauses awaiting operator approval before it runs.
     #[serde(default)]
     requires_approval: Option<bool>,
+    /// When `false`, a continuation must not repeat this node's call — it
+    /// replays the result the earlier run recorded (issue #850). Only valid on
+    /// `tool_call` and `http_request`, the two kinds that make a call.
+    #[serde(default)]
+    repeatable: Option<bool>,
     /// Where an `output` node's report goes once the run finishes:
     /// `{"kind": "owner"|"email"|"channel", "target"?: "…"}`. Rejected on any
     /// other node kind, and each kind's target contract is enforced by
@@ -662,6 +667,7 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
                 on_error: n.on_error,
                 retry: n.retry.map(WorkflowRetryDef::from),
                 requires_approval: n.requires_approval,
+                repeatable: n.repeatable,
                 destination: n.destination,
             });
         }
@@ -3327,6 +3333,7 @@ mod tests {
                     backoff: Some("exponential".into()),
                 }),
                 requires_approval: Some(true),
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -3515,6 +3522,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 WorkflowNodeDef {
@@ -3528,6 +3536,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],

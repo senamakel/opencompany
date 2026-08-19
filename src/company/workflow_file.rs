@@ -364,6 +364,22 @@ pub struct WorkflowNodeDef {
     /// When `true`, the node pauses awaiting operator approval before it runs —
     /// the engine surfaces it on `WorkflowRun.pending_approvals`.
     pub requires_approval: Option<bool>,
+    /// When `false`, a continuation must not make this node's call a second
+    /// time — it replays the result the earlier run recorded instead (issue
+    /// #850).
+    ///
+    /// **The engine never sees this**, for the same reason
+    /// [`WorkflowDestinationDef`] does not: the replay rewrite runs host-side,
+    /// before compilation, in [`crate::workflows::replay`].
+    ///
+    /// Only `Some(false)` changes anything. It exists for the calls the host
+    /// cannot classify from the outside — `shell` above all, which can reach a
+    /// counterparty through a command the host does not parse — so the author
+    /// states what only they can know. `Some(true)` restates the default (every
+    /// node repeats unless the host classifies it as outward) and is accepted so
+    /// an author can say it out loud; it never removes a guard #846 already
+    /// applies, because the two are consulted in that order.
+    pub repeatable: Option<bool>,
     /// Where this node's report is delivered once the run finishes — `output`
     /// nodes only. `None` (every legacy graph) keeps the pre-#170 behaviour: the
     /// value surfaces in the run-result drawer and goes nowhere else.
@@ -467,6 +483,11 @@ pub(crate) struct RawNode {
     /// rendered TOML keeps every scalar above the `[node.config]` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) schedule: Option<String>,
+    /// Issue #850's per-node repeat declaration. Declared here, among the
+    /// leading scalars, for the reason `schedule` is: `toml::to_string` refuses
+    /// to emit a scalar after a table, so every scalar must precede `config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repeatable: Option<bool>,
     /// Free-form node config, read as a TOML value (not `serde_json`) so the
     /// `Serialize` half — used by the workflow creator's
     /// [`render_workflow`] round-trip — stays representable in TOML (TOML has no
@@ -643,6 +664,9 @@ pub(crate) fn project_workflow_spec(raw: &RawWorkflow) -> WorkflowSpecProjection
         if let Some(requires_approval) = node.requires_approval {
             fields.push(("requires_approval", requires_approval.to_string()));
         }
+        if let Some(repeatable) = node.repeatable {
+            fields.push(("repeatable", repeatable.to_string()));
+        }
         if !fields.is_empty() {
             unexpressible.push((node.id.clone(), fields));
         }
@@ -733,6 +757,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 on_error: node.on_error,
                 retry: node.retry,
                 requires_approval: node.requires_approval,
+                repeatable: node.repeatable,
                 destination: node.destination,
             })
             .collect(),
@@ -1238,6 +1263,24 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
             }
         }
 
+        // `repeatable` says whether a continuation may make this node's call a
+        // second time (issue #850). Only the two kinds that make a call have an
+        // answer to that question — `tool_call` and `http_request`, which are
+        // exactly the kinds `crate::workflows::replay::outward_call_of` reads.
+        // On anything else it is inert, and an inert declaration an author
+        // believes is a guard is worse than no field at all.
+        if node.repeatable.is_some()
+            && !matches!(
+                kind,
+                Some(WorkflowNodeKind::ToolCall) | Some(WorkflowNodeKind::HttpRequest)
+            )
+        {
+            problems.push(format!(
+                "{label} sets `repeatable` but is a `{}` node — only `tool_call` and `http_request` nodes make a call that could be repeated.",
+                node.kind
+            ));
+        }
+
         // `destination` routes an `output` node's report to a person or a
         // channel after the run finishes. Only `output` nodes report back, and
         // each kind has its own target contract — an author who gets this wrong
@@ -1297,6 +1340,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 "requires_approval",
                 "schedule",
                 "destination",
+                "repeatable",
             ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
@@ -1841,6 +1885,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -1854,6 +1899,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -1893,6 +1939,7 @@ mod tests {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: vec![],
@@ -3152,6 +3199,92 @@ to = "to_channel"
         assert!(err.to_string().contains("`owner` destination"), "{err}");
     }
 
+    /// `repeatable` is a statement about a call, so a node that makes none has
+    /// no answer to give — and an inert declaration an author believes is a
+    /// guard is worse than no field at all (issue #850).
+    #[test]
+    fn repeatable_on_a_node_that_makes_no_call_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            repeatable = false
+            [[edge]]
+            from = "start"
+            to = "worker"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `tool_call` and `http_request` nodes make a call"),
+            "{err}"
+        );
+    }
+
+    /// The two kinds that do make a call accept it.
+    #[test]
+    fn repeatable_is_accepted_on_a_tool_call() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "publish"
+            kind = "tool_call"
+            name = "Publish"
+            repeatable = false
+            [node.config]
+            slug = "shell"
+            [[edge]]
+            from = "start"
+            to = "publish"
+        "#;
+        let wf = parse_workflow(src).expect("valid");
+        let node = wf.nodes.iter().find(|n| n.id == "publish").expect("node");
+        assert_eq!(node.repeatable, Some(false));
+    }
+
+    /// `repeatable` inside `config` would ride into the engine graph as an
+    /// inert key and guard nothing — reject it like the other reserved keys.
+    #[test]
+    fn repeatable_inside_config_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "publish"
+            kind = "tool_call"
+            name = "Publish"
+            [node.config]
+            slug = "shell"
+            repeatable = false
+            [[edge]]
+            from = "start"
+            to = "publish"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("puts `repeatable` inside `config`"),
+            "{err}"
+        );
+    }
+
     /// Only `output` nodes report back, so a `destination` anywhere else is a
     /// silent no-op waiting to happen.
     #[test]
@@ -3226,6 +3359,7 @@ to = "to_channel"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -3239,6 +3373,7 @@ to = "to_channel"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: Some(WorkflowDestinationDef {
                         kind: "email".to_string(),
                         target: Some("ada@example.com".to_string()),
@@ -3278,6 +3413,7 @@ to = "to_channel"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -3308,6 +3444,7 @@ to = "to_channel"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -3321,6 +3458,7 @@ to = "to_channel"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -3537,6 +3675,7 @@ to = "to_channel"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             }],
             edges: Vec::new(),
@@ -3569,6 +3708,7 @@ to = "to_channel"
                     on_error: n.on_error.clone(),
                     retry: n.retry.clone(),
                     requires_approval: n.requires_approval,
+                    repeatable: None,
                     destination: n.destination.clone(),
                 })
                 .collect(),

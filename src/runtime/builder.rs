@@ -4960,6 +4960,7 @@ mod test {
             on_error: None,
             retry: None,
             requires_approval: None,
+            repeatable: None,
             destination: None,
         };
         RawWorkflow {

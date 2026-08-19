@@ -473,6 +473,12 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
             on_error: None,
             retry: None,
             requires_approval: n.requires_approval,
+            // Deliberately not carried, alongside `on_error` and `retry`: a
+            // repeat guard is a safety declaration about a call reaching a
+            // counterparty, which is the operator's to make. The copilot
+            // proposes a graph; it does not decide what a continuation may send
+            // twice. An operator sets it afterwards through the write route.
+            repeatable: None,
             destination: n.destination.clone(),
         });
     }
@@ -2359,6 +2365,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -2372,6 +2379,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -2385,6 +2393,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -2652,6 +2661,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                repeatable: None,
                 destination: None,
             });
         }
@@ -4138,6 +4148,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -4151,6 +4162,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -4677,6 +4689,7 @@ to = "done"
             on_error: None,
             retry: None,
             requires_approval: None,
+            repeatable: None,
             destination: None,
         };
         RawWorkflow {
@@ -4808,6 +4821,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
                 RawNode {
@@ -4821,6 +4835,7 @@ to = "done"
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    repeatable: None,
                     destination: None,
                 },
             ],
@@ -5756,6 +5771,7 @@ to = "done"
             on_error: None,
             retry: None,
             requires_approval: None,
+            repeatable: None,
             destination: None,
         }
     }

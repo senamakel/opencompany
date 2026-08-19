@@ -4483,6 +4483,10 @@ impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                // Same reason as the three above: a repeat guard (issue #850)
+                // is a safety declaration about a call reaching a counterparty,
+                // which is the operator's to make, not the agent's to author.
+                repeatable: None,
                 destination: n.destination,
             });
         }
