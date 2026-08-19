@@ -68,6 +68,15 @@ export interface WorkflowNode {
   };
   /** Whether the node pauses for a human approval before proceeding. */
   requiresApproval?: boolean;
+  /**
+   * `false` when a continuation must not repeat this node's call — it replays
+   * the result the earlier run recorded instead (issue #850).
+   *
+   * Only meaningful on `tool_call` and `http_request`, the two kinds that make
+   * a call. Absent is the default: the node repeats unless the host already
+   * classifies its call as reaching outside the company.
+   */
+  repeatable?: boolean;
   /** Where an `output` node's report goes when the run finishes. */
   destination?: WorkflowDestination;
 }

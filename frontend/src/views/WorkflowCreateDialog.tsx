@@ -121,6 +121,13 @@ interface DraftNode {
   onError?: string;
   retry?: WorkflowNode["retry"];
   requiresApproval?: boolean;
+  /**
+   * Issue #850. Carried but not authored here: an operator sets it through the
+   * write route, and this dialog must round-trip it rather than drop it — a
+   * lost `repeatable: false` is a repeat guard removed by an unrelated edit,
+   * the same hazard as a dropped `requiresApproval`.
+   */
+  repeatable?: boolean;
 }
 
 /** "No schedule" — the workflow runs only when something starts it. A sentinel
@@ -440,6 +447,7 @@ function draftNodes(graph: WorkflowGraph): DraftNode[] {
       onError: n.onError,
       retry: n.retry,
       requiresApproval: n.requiresApproval,
+      repeatable: n.repeatable,
     };
     // A form kind (#541) hydrates its config into per-field strings plus a
     // preserved `extra` bag; a form-less kind keeps the raw overlay in `config`.
@@ -1376,6 +1384,7 @@ export function WorkflowCreateDialog({
           onError: n.onError,
           retry: n.retry,
           requiresApproval: n.requiresApproval,
+          repeatable: n.repeatable,
         });
       }
       const graph: WorkflowGraph = {
