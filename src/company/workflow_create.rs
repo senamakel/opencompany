@@ -1866,6 +1866,13 @@ pub(crate) async fn delete_company_workflow(
     // across a restart.
     record.overlay_workflows.remove(index);
     record.manifest.workflows.enabled.retain(|id| id != wid);
+    // Issue #1017: purge the pause flag too. `disabled_workflows` is keyed by id,
+    // so a workflow re-created under this id later would otherwise inherit the
+    // deleted one's pause and stay silently off its schedule. `retain` is a purge,
+    // NOT a re-arm: the "enabled == true" state is only ever reached through the
+    // explicit enable route (see `CompanyRecord::set_workflow_enabled`), and this
+    // id has no body left to run regardless.
+    record.disabled_workflows.retain(|id| id != wid);
     store.save(&record).await?;
 
     drop(_lock);
@@ -3661,6 +3668,60 @@ to = "done"
             }
             other => panic!("expected WorkflowDeleted, got {other:?}"),
         }
+    }
+
+    /// Issue #1017: deleting a paused workflow must purge its pause flag, so a
+    /// workflow later re-created under the same id starts armed instead of
+    /// inheriting a stale pause the operator never asked for. `disabled_workflows`
+    /// is keyed by id, and a re-created id reuses it, so a leftover entry would
+    /// silently keep the fresh workflow off its schedule.
+    #[tokio::test]
+    async fn deleting_a_paused_workflow_purges_the_stale_pause_for_a_re_create() {
+        let company = CompanyId::new("acme");
+        let (store, version) = with_one_workflow(&company, "greeter", "Greeter").await;
+
+        // Pause it — the id lands in `disabled_workflows`.
+        set_company_workflow_enabled(&company, None, &store, None, "greeter", false, true, &[])
+            .await
+            .expect("pausing must never be refused");
+        let paused = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            !paused.workflow_enabled("greeter"),
+            "precondition: the workflow is paused"
+        );
+
+        // Delete it, then re-create the same id from scratch.
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            None,
+            "greeter",
+            Some(&version),
+        )
+        .await
+        .expect("deletes");
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("re-create");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            !record.disabled_workflows.iter().any(|id| id == "greeter"),
+            "the delete must purge the stale pause flag"
+        );
+        assert!(
+            record.workflow_enabled("greeter"),
+            "a re-created workflow must start armed, not inherit the deleted one's pause"
+        );
     }
 
     /// Issue #1045: the REST create/delete persist path puts

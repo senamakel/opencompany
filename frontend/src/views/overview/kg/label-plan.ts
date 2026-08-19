@@ -91,7 +91,7 @@ const LABEL_GAP_X = 3;
 export type LabelBox = { x0: number; y0: number; x1: number; y1: number };
 
 /**
- * A candidate's label box in screen px, padded by {@link LABEL_GAP}.
+ * A candidate's label box in screen px, padded by {@link LABEL_GAP_X}.
  * `scale` is px per graph unit (canvas width ÷ camera width).
  */
 export function labelBoxPx(c: LabelCandidate, cam: LabelCamera, scale: number): LabelBox {

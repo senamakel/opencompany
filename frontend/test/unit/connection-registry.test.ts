@@ -111,8 +111,122 @@ describe("registering a host", () => {
     expect(getConnection(addConnection({ baseUrl: "https://acme.test:9000" }))?.label).toBe(
       "acme.test:9000",
     );
-    // Same-origin, which is how the web build is configured.
-    expect(getConnection(addConnection({ baseUrl: "" }))?.label).toBe("This host");
+    // Same-origin, which is how the web build is configured. Named by the
+    // origin serving the page rather than by a constant: issue #1167, where two
+    // such rows in the host switcher came out with identical names and only a
+    // dot colour between them.
+    expect(getConnection(addConnection({ baseUrl: "" }))?.label).toBe(window.location.host);
+    expect(window.location.host).not.toBe("");
+  });
+
+  it("re-derives the name a version before #1167 wrote down", () => {
+    // The durability half. Every console that has already run wrote "This host"
+    // into `oc.connections.v1`, and a remembered label outranks a derived one —
+    // so without this the indistinguishable name outlives the fix on exactly
+    // the machines that reported it.
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-legacy-origin",
+          baseUrl: "",
+          label: "This host",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+
+    const [id] = restoreConnections();
+
+    expect(id).toBe("conn-legacy-origin");
+    expect(getConnection(id)?.label).toBe(window.location.host);
+    // And written back, so the next load reads the new name rather than
+    // re-deriving it forever.
+    expect(findProfile("", null)?.label).toBe(window.location.host);
+  });
+
+  it("keeps a name an operator's host reported for itself", () => {
+    // The rule only reaches the constant. A host that named itself, or one
+    // someone typed an address for, is untouched.
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-named",
+          baseUrl: "",
+          label: "Acme",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+
+    expect(getConnection(restoreConnections()[0])?.label).toBe("Acme");
+  });
+});
+
+/**
+ * One same-origin row, not one per company ever opened here (issue #1167).
+ *
+ * Profiles are keyed on `(baseUrl, defaultCompany)`, so a link carrying
+ * `?company=` writes a second durable profile at the *same* (empty) address.
+ * Restoring all of them put an identical row in the host switcher for every
+ * company ever visited — same host, same name, nothing that expired them.
+ */
+describe("the same-origin console", () => {
+  const profiles = [
+    {
+      id: "conn-origin-alias",
+      baseUrl: "",
+      label: "This host",
+      defaultCompany: null,
+      credential: { kind: "cookie" },
+    },
+    {
+      id: "conn-origin-acme",
+      baseUrl: "",
+      label: "This host",
+      defaultCompany: "acme",
+      credential: { kind: "cookie" },
+    },
+    {
+      id: "conn-remote",
+      baseUrl: "https://remote.test",
+      label: "Remote",
+      defaultCompany: null,
+      credential: { kind: "cookie" },
+    },
+  ];
+
+  beforeEach(() => {
+    window.localStorage.setItem("oc.connections.v1", JSON.stringify(profiles));
+  });
+
+  it("restores only the one this page load is, plus every other host", () => {
+    expect(restoreConnections(undefined, { defaultCompany: "acme" })).toEqual([
+      "conn-origin-acme",
+      "conn-remote",
+    ]);
+  });
+
+  it("keeps the profile it skipped, so its scoped state survives", () => {
+    restoreConnections(undefined, { defaultCompany: "acme" });
+
+    // Skipped, not forgotten — the distinction `retireConnection` exists for.
+    // Opening `?company=` again must land on the same connection id, because
+    // every browser-local key is named after it (`scopedKey`).
+    expect(findProfile("", null)?.id).toBe("conn-origin-alias");
+  });
+
+  it("restores every remembered host when the bootstrap is not same-origin", () => {
+    // A desktop, or a console pointed elsewhere with `?api=`: neither makes any
+    // claim about what lives at its own origin, so nothing is filtered.
+    expect(restoreConnections()).toEqual([
+      "conn-origin-alias",
+      "conn-origin-acme",
+      "conn-remote",
+    ]);
   });
 });
 
@@ -488,7 +602,7 @@ describe("a same-origin profile", () => {
     resetConnections();
 
     expect(restoreConnections()).toEqual([id]);
-    expect(getConnection(id)?.label).toBe("This host");
+    expect(getConnection(id)?.label).toBe(window.location.host);
   });
 });
 

@@ -40,7 +40,6 @@ import {
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
 import {
-  AutoCollapse,
   RESTING_ROW,
   SidebarCollapseToggle,
   SidebarControls,
@@ -1298,7 +1297,6 @@ export function AppShell({
         aria-label="Toggle sidebar"
         className="fixed bottom-4 left-4 z-50 md:hidden"
       />
-      <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>
           {/* Which host, and how every host is doing. It sits above the collapse

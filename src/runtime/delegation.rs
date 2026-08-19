@@ -307,6 +307,19 @@ pub(crate) struct DeskReply {
     /// folded INTO this member's answer rather than surfacing on its own, so a
     /// cap two levels down is a cap on what the operator reads here.
     pub(crate) hit_iteration_cap: bool,
+    /// The in-turn spend halt behind this answer, if one stopped it — this
+    /// teammate's own turn or any turn nested beneath it (issue #1032).
+    ///
+    /// Folded exactly as `hit_iteration_cap` is, and for the same reason: a
+    /// deeper delegate's work is folded INTO this member's reply, so a halt two
+    /// levels down is a halt on what the operator ends up reading.
+    ///
+    /// **First halt wins** rather than last, because this carries figures and a
+    /// teammate name rather than a bare flag — there is one bubble and it can
+    /// name one cap. The first is the one that cut work short earliest, and the
+    /// claim it makes is incomplete but never wrong, the same trade the
+    /// first-wins `spawned_task` beside it already takes.
+    pub(crate) halted_for_spend: Option<crate::harness::SpendHalt>,
 }
 
 /// What was already decided about the operator message a drain belongs to
@@ -431,6 +444,16 @@ pub(crate) struct OperatorTurn {
     /// delegate hit — the operator would read a relayed answer that quietly
     /// omits that a branch of it stopped half-done.
     pub(crate) hit_iteration_cap: bool,
+    /// The in-turn spend halt behind **any** turn on this bubble (issue #1032)
+    /// — the responder's, a desk lead's, or the CEO relay's.
+    ///
+    /// First-wins for the same reason the sticky OR beside it exists: one
+    /// operator message can run several turns and the operator gets exactly ONE
+    /// bubble for the whole chain, and the relay turn *replaces* the reply text,
+    /// so tracking the last value would erase a halt the responder or a delegate
+    /// hit. Where the flag beside it ORs, this keeps the first `Some` — it
+    /// carries figures, and one notice can quote one cap.
+    pub(crate) halted_for_spend: Option<crate::harness::SpendHalt>,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -1033,6 +1056,10 @@ impl<'a> DelegationRunner<'a> {
         // reassigned, only OR'd — so a cap the responder hit survives the relay
         // turn replacing the reply text.
         let mut hit_iteration_cap = outcome.hit_iteration_cap;
+        // Issue #1032: sticky the same way, kept as first-wins — never
+        // overwritten, only filled when still empty — so a spend halt the
+        // responder hit survives the relay turn replacing the reply text.
+        let mut halted_for_spend = outcome.halted_for_spend;
         // Settle the direct-answer card from the turn that just ran. Done before
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
@@ -1080,6 +1107,7 @@ impl<'a> DelegationRunner<'a> {
             // remember the answer to relay.
             operator_steps.extend(desk.steps);
             hit_iteration_cap |= desk.hit_iteration_cap;
+            halted_for_spend = halted_for_spend.or(desk.halted_for_spend);
             desk_replies.push((desk.member, desk.reply));
         }
         // CEO-relay hand-back: when a synchronous desk delegation answered, run
@@ -1149,6 +1177,7 @@ impl<'a> DelegationRunner<'a> {
             operator_reply = relay.reply;
             operator_steps.extend(relay.steps);
             hit_iteration_cap |= relay.hit_iteration_cap;
+            halted_for_spend = halted_for_spend.or(relay.halted_for_spend);
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -1173,6 +1202,7 @@ impl<'a> DelegationRunner<'a> {
             bubbles,
             spawned_task,
             hit_iteration_cap,
+            halted_for_spend,
         })
     }
 
@@ -1728,6 +1758,13 @@ impl<'a> DelegationRunner<'a> {
         // deeper delegate that stopped half-done is folded into THIS member's
         // answer, so its pause is a pause on what the operator ends up reading.
         let mut hit_iteration_cap = outcome.hit_iteration_cap;
+        // Issue #1032: and so does the spend halt. This is the fold that makes
+        // a halt two levels down reach the operator at all — the deeper reply is
+        // folded into THIS member's text, so without carrying its halt with it
+        // the operator reads an answer whose missing half was cut for money and
+        // is told nothing. First-wins, so the shallower halt (the one nearest
+        // the answer the operator reads) is the one named.
+        let mut halted_for_spend = outcome.halted_for_spend;
         for deeper in nested.desk_replies {
             reply.push_str(&format!(
                 "\n\n{} (delegated by {member}) replied:\n{}",
@@ -1735,6 +1772,7 @@ impl<'a> DelegationRunner<'a> {
             ));
             steps.extend(deeper.steps);
             hit_iteration_cap |= deeper.hit_iteration_cap;
+            halted_for_spend = halted_for_spend.or(deeper.halted_for_spend);
         }
         // A cancelled nested run folds in as a cancellation, NEVER as a
         // reply: the member said it was handing that slice on, and an
@@ -1775,6 +1813,7 @@ impl<'a> DelegationRunner<'a> {
                 reply,
                 steps,
                 hit_iteration_cap,
+                halted_for_spend,
             }),
             cancelled: false,
             // Issue #442: the hand-off's own card, reported the same way
@@ -3148,6 +3187,12 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
         /// the call would be wiped by the pre-turn clear, and one that staged
         /// after would skip the boundary the drain reads.
         authors: Vec<TaskOutputWorkflow>,
+        /// The in-turn spend halt this turn reports (issue #1032), standing in
+        /// for the real [`SpendStopHook`](crate::harness::spend::SpendStopHook)
+        /// firing. There is no way to arm the real hook here — these fixtures
+        /// run no model — so this is how a test scripts "this teammate ran out
+        /// of money mid-turn" and then asserts where that fact ends up.
+        spend_halt: Option<crate::harness::SpendHalt>,
     }
 
     impl Turn {
@@ -3201,6 +3246,20 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             Self {
                 reply: reply.to_string(),
                 refuses: desks.iter().map(|d| d.to_string()).collect(),
+                ..Self::default()
+            }
+        }
+
+        /// A turn the in-turn spend brake halted (issue #1032): it replies with
+        /// whatever it had, and reports the halt alongside.
+        fn spend_halted(reply: &str, agent: &str, spent_usd: f64, cap_usd: f64) -> Self {
+            Self {
+                reply: reply.to_string(),
+                spend_halt: Some(crate::harness::SpendHalt {
+                    agent: agent.to_string(),
+                    spent_usd,
+                    cap_usd,
+                }),
                 ..Self::default()
             }
         }
@@ -3386,6 +3445,12 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
                 // These fixtures script delegation shapes, not cap behaviour;
                 // the cap path is proved end-to-end in `cap_turn_test`.
                 hit_iteration_cap: false,
+                // Issue #1032: scripted, for the same reason — the real hook
+                // needs a real model turn to fire, which is proved end-to-end
+                // in `spend_halt_turn_test`. What these fixtures can prove, and
+                // that one cannot, is that the halt survives the DELEGATION
+                // folds, including the nested one.
+                halted_for_spend: turn.spend_halt,
             }
         }
     }
@@ -6103,6 +6168,170 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
                 .contains("everyone lands around 100 rps"),
             "the nested answer must be on the card note: {:?}",
             cards[0].note
+        );
+    }
+
+    // ── issue #1032: the spend halt folds like the answer does ──────────────
+
+    /// **The plumbing this issue is really about.** A delegate two levels down
+    /// runs out of money, and the operator is told — because its halt folds into
+    /// the member's answer exactly as its reply and steps already do.
+    ///
+    /// The researcher's answer does not surface as its own bubble: it is folded
+    /// into the engineer's reply, which the CEO relay then *replaces* with one
+    /// coherent sentence. So there are two places the halt can be dropped
+    /// silently — the nested fold in `run_hand_off`, and the relay overwrite in
+    /// `handle_operator_message` — and either one leaves the operator reading a
+    /// confident answer whose missing half was cut for spend.
+    #[tokio::test]
+    async fn a_nested_delegates_spend_halt_reaches_the_operator_turn() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                // Two levels down, and out of money partway through.
+                Turn::spend_halted("I got as far as two competitors", "researcher", 4.02, 4.0),
+                Turn::reply("Built. Research is partial."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let halt = out
+            .halted_for_spend
+            .expect("a halt two levels down must reach the operator bubble");
+        assert_eq!(
+            halt.agent, "researcher",
+            "the notice must name the teammate that actually ran out, not the one relaying it"
+        );
+        assert_eq!(halt.cap_usd, 4.0);
+        assert_eq!(halt.spent_usd, 4.02);
+        // The relay really did replace the reply — so the halt survived an
+        // overwrite rather than riding along on text that happened to persist.
+        assert_eq!(out.reply, "Built. Research is partial.");
+    }
+
+    /// The negative control the test above needs: the same four-turn chain with
+    /// nobody halted reports no halt.
+    ///
+    /// Without this, `halted_for_spend` wired to a hardcoded `Some` would pass
+    /// every other assertion in this file.
+    #[tokio::test]
+    async fn a_chain_where_nobody_ran_out_reports_no_spend_halt() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it to engineering", vec![handoff("ship the API")]),
+                Turn::tooling(
+                    "I built it; asking research about the rate limits",
+                    vec![nested_handoff("what rate limits do competitors use?")],
+                ),
+                Turn::reply("everyone lands around 100 rps"),
+                Turn::reply("Built, and research says ~100 rps is the norm."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            out.halted_for_spend.is_none(),
+            "a notice that fires on every turn is as useless as one that never fires: {:?}",
+            out.halted_for_spend
+        );
+    }
+
+    /// The responder's own halt survives the relay turn replacing its text.
+    ///
+    /// This is the sibling of the sticky OR beside it, and the same trap: the
+    /// relay overwrites `operator_reply` wholesale, so a halt tracked as "the
+    /// last turn's value" would be erased by a relay turn that itself ran fine.
+    #[tokio::test]
+    async fn a_responders_own_halt_survives_the_relay_replacing_the_reply() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // The orchestrator runs out of money AND still manages to hand
+                // off — the halt is on the turn that queued the delegation.
+                Turn {
+                    reply: "handing it to engineering".to_string(),
+                    tool_pushes: vec![handoff("ship the API")],
+                    spend_halt: Some(crate::harness::SpendHalt {
+                        agent: "chief".to_string(),
+                        spent_usd: 2.5,
+                        cap_usd: 2.0,
+                    }),
+                    ..Turn::default()
+                },
+                Turn::reply("shipped"),
+                Turn::reply("All shipped."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let halt = out
+            .halted_for_spend
+            .expect("the responder's halt must survive the relay overwriting the reply");
+        assert_eq!(halt.agent, "chief");
+        assert_eq!(out.reply, "All shipped.", "the relay did replace the text");
+    }
+
+    /// Two halts in one chain report the **first**, not the last.
+    ///
+    /// One operator message, one bubble, one cap it can name. First-wins keeps
+    /// the claim incomplete but never wrong — and keeps it anchored to the
+    /// teammate nearest the answer the operator reads, rather than to whichever
+    /// turn happened to run last.
+    #[tokio::test]
+    async fn two_halts_in_one_chain_report_the_first() {
+        let fx = Fixture::nested();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn {
+                    reply: "handing it to engineering".to_string(),
+                    tool_pushes: vec![handoff("ship the API")],
+                    spend_halt: Some(crate::harness::SpendHalt {
+                        agent: "chief".to_string(),
+                        spent_usd: 2.5,
+                        cap_usd: 2.0,
+                    }),
+                    ..Turn::default()
+                },
+                Turn::spend_halted("partly done", "engineer", 9.1, 9.0),
+                Turn::reply("Partly shipped."),
+            ],
+        );
+
+        let out = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "ship the API", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let halt = out.halted_for_spend.expect("a halt is reported");
+        assert_eq!(
+            halt.agent, "chief",
+            "the first halt in the chain is the one named"
         );
     }
 

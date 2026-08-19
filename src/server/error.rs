@@ -47,6 +47,16 @@ impl ApiError {
             | OpenCompanyError::MissingManifest(_)
             | OpenCompanyError::InvalidRequest(_)
             | OpenCompanyError::WorkflowInvalid { .. } => StatusCode::BAD_REQUEST,
+            // Issue #1017: a stored company data file that no longer parses is
+            // the caller's bad input, not a server fault — 400, so a route like
+            // get_workflow (and the render `?` in update_company_workflow)
+            // surfaces the parse message instead of a blank 500. One central
+            // mapping covers every current and future caller that lets a
+            // DataParse escape as an ApiError.
+            OpenCompanyError::DataParse { .. } => StatusCode::BAD_REQUEST,
+            // A file that parses but fails validation is a semantically bad
+            // payload the caller can correct — 422.
+            OpenCompanyError::DataInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             OpenCompanyError::LifecycleConflict(_) | OpenCompanyError::Conflict(_) => {
                 StatusCode::CONFLICT
             }
@@ -142,6 +152,30 @@ mod test {
 
         let other = ApiError(OpenCompanyError::Store("disk full".into()));
         assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn maps_company_data_errors_to_400_and_422() {
+        // Issue #1017: an unparseable company data file (e.g. a workflow whose
+        // stored body is no longer valid TOML) is the caller's bad input, not a
+        // server fault — 400 with the stable `data_parse` code, so a route like
+        // get_workflow surfaces the parse message instead of a blank 500.
+        let parse = ApiError(OpenCompanyError::DataParse {
+            path: PathBuf::from("workflows/weekly-digest.toml"),
+            message: "expected `=` after key".into(),
+        });
+        assert_eq!(parse.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(parse.0.code(), "data_parse");
+
+        // A file that parses but fails validation is a semantically bad payload —
+        // 422, matching how the render `?` in update_company_workflow should
+        // report a graph the caller can fix.
+        let invalid = ApiError(OpenCompanyError::DataInvalid {
+            path: PathBuf::from("workflows/weekly-digest.toml"),
+            problems: vec!["missing a trigger".into()],
+        });
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid.0.code(), "data_invalid");
     }
 
     #[test]

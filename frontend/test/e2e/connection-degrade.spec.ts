@@ -30,6 +30,15 @@ import { openHostMenu } from "./host-switcher";
 /** A port nothing is listening on, so the second connection is always down. */
 const DEAD_HOST = "http://127.0.0.1:9";
 
+/** The tour modal covers the board and swallows clicks. */
+async function silenceTour(page: Page) {
+  await page.addInitScript(() => {
+    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+      window.localStorage.setItem(key, JSON.stringify({ skipped: true, seenAt: Date.now() }));
+    }
+  });
+}
+
 /**
  * Seeds a second host into the connection store before the app boots.
  *
@@ -39,11 +48,8 @@ const DEAD_HOST = "http://127.0.0.1:9";
  * shell is where adding hosts becomes a first-class flow).
  */
 async function seedSecondHost(page: Page) {
+  await silenceTour(page);
   await page.addInitScript((dead) => {
-    // The tour modal covers the board and swallows clicks.
-    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
-      window.localStorage.setItem(key, JSON.stringify({ skipped: true, seenAt: Date.now() }));
-    }
     window.localStorage.setItem(
       "oc.connections.v1",
       JSON.stringify([
@@ -98,6 +104,14 @@ test("a host that is down reddens its own row and leaves the others working", as
   await expect(page.getByTestId("host-row-conn-dead")).toHaveAttribute("data-status", "down", {
     timeout: 30_000,
   });
+  // And it says so in words, not only in the colour of its dot. An operator
+  // who cannot separate amber from green — or who can, and still does not know
+  // *what* amber means here — otherwise learns the host is gone by switching
+  // to it and landing on its failure (issue #1167).
+  await expect(page.getByTestId("host-row-state-conn-dead")).toHaveText("Unreachable");
+  // The working row stays quiet: a state printed beside every host is a state
+  // beside none of them.
+  await expect(page.getByTestId("host-row-state-conn-primary")).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   // THE assertion. The working host's console is rendered, not a full-screen
@@ -161,4 +175,54 @@ test("the number row switches hosts, and leaves the browser alone past the last 
   await page.keyboard.press(`${mod}+1`);
   await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1);
   await expect(page.getByTestId("connection-error")).toHaveCount(0);
+});
+
+/**
+ * The naming half of issue #1167, and the state that produced the screenshot.
+ *
+ * The same-origin host is the one with no url of its own to read, and it used
+ * to be named by a constant — so a console holding it beside anything else
+ * unnamed offered two rows reading "This host", one live and one not, with only
+ * a dot colour between them. Nothing is seeded for it here on purpose: the
+ * point is what the console calls a host it was told nothing about.
+ */
+test("names the host it was told nothing about by the address it answers on", async ({
+  page,
+  baseURL,
+}) => {
+  const origin = new URL(baseURL ?? "http://127.0.0.1:8080").host;
+  await silenceTour(page);
+  await page.addInitScript((dead) => {
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        // A second host, and nothing about the bootstrap one — which is exactly
+        // the arrangement an ordinary console reaches by adding a host.
+        {
+          id: "conn-unnamed-dead",
+          baseUrl: dead,
+          label: "Offline host",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+  }, DEAD_HOST);
+
+  await page.goto("/#/ledgers/tasks");
+  await openHostMenu(page);
+
+  const rows = await page.getByRole("menuitem").allInnerTexts();
+  // Every menu item but the trailing "Add a host", down to its first line: a
+  // row also carries its state and its shortcut, and a shortcut differs on
+  // every row — comparing whole rows would call two identical names distinct.
+  const names = rows
+    .filter((text) => !text.includes("Add a host"))
+    .map((text) => text.split("\n")[0].trim());
+  expect(names.length).toBe(2);
+  expect(new Set(names).size, `two hosts must not read alike: ${JSON.stringify(names)}`).toBe(2);
+  // Addressable, so it distinguishes — and distinct from every other row, which
+  // a constant could never promise.
+  expect(names.some((name) => name.includes(origin))).toBe(true);
+  expect(names.some((name) => name.includes("This host"))).toBe(false);
 });

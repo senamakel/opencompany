@@ -38,12 +38,12 @@ names (issue #1104).
 | When | Named |
 |---|---|
 | at rest | the company, every department, and the roster — agents and people |
-| hovering | the node under the pointer, and only that node |
+| hovering | the node under the pointer — the lit chain behind it stays unnamed |
 | in a focused tree | the node you clicked and its direct children — a pillar names its tasks, an agent names its tools |
 
-Selection always keeps its name, and everything else the pointer reaches keeps
-a `<title>`, so a native tooltip is the floor wherever a drawn label is
-suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
+Selection ranks just below hover, so it keeps its name against everything
+except the node under the pointer. Every node keeps a `<title>`, so a native
+tooltip is the floor wherever a drawn label is suppressed. Tasks, workflow stages and tools are the numerous tiers, which is
 why they are bare until you point at one.
 
 Whatever that leaves is then decluttered: candidates are placed highest

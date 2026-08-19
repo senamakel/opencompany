@@ -208,6 +208,18 @@ type Company {
 	"""
 	smtp: SmtpStatus!
 	"""
+	The approval policy in force (issue #1070).
+	
+	Answers from the same derivation `GET {scope}/policy` uses, so the two
+	read surfaces cannot report different tiers for one company. Read-only:
+	the write plane stays REST-and-admin-only (issue #562).
+	
+	This sits beside [`Self::approvals`] on purpose. That field says what is
+	parked; this one says whether anything ever parks, and an empty queue
+	means opposite things under `supervised` and `full`.
+	"""
+	policy: Policy!
+	"""
 	The source-template provenance recorded at launch: the stable template
 	id (directory slug) and, when known, its version. Null for a company
 	provisioned from a raw manifest body rather than a template.
@@ -647,6 +659,72 @@ type MessageStep {
 	How long the step took in milliseconds, when known.
 	"""
 	elapsedMs: Float
+}
+
+"""
+The company's approval policy, as `GET {scope}/policy` reports it.
+"""
+type Policy {
+	"""
+	The tier **actually in force** — the console override where one sets it,
+	the committed manifest otherwise.
+	"""
+	mode: String!
+	"""
+	The always-ask list actually in force. The operator's real lever: it
+	wins over every tier, `full` included.
+	"""
+	alwaysApprove: [String!]!
+	"""
+	The manifest's tier, so a client can see what a reset would restore.
+	"""
+	manifestMode: String!
+	"""
+	The manifest's always-ask list, for the same reason.
+	"""
+	manifestAlwaysApprove: [String!]!
+	"""
+	Whether an operator override is in force.
+	
+	Distinct from comparing `mode` with `manifestMode`: an override that
+	happens to match the manifest is still an override, and is still what a
+	reset would remove.
+	"""
+	overridden: Boolean!
+	"""
+	Who set the override, if one is set.
+	"""
+	setBy: String
+	"""
+	When it was set (epoch millis), if one is set.
+	"""
+	setAtMillis: Float
+	"""
+	The selectable tiers with their operator-facing consequences.
+	"""
+	tiers: [PolicyTier!]!
+	"""
+	When a change bites.
+	"""
+	takesEffect: String!
+}
+
+"""
+One selectable tier and what choosing it means.
+"""
+type PolicyTier {
+	"""
+	The `[policy].mode` word.
+	"""
+	value: String!
+	"""
+	The operator-facing label.
+	"""
+	label: String!
+	"""
+	What choosing it means, in consequences rather than tier vocabulary.
+	"""
+	description: String!
 }
 
 """

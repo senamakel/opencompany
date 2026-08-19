@@ -654,7 +654,34 @@ impl AppState {
         if let Some(cached) = self.skill_registry.get() {
             return Ok(cached.clone());
         }
-        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)?.into();
+        // A *configured* library that is missing or not a directory is a host
+        // misconfiguration, not a parse failure `load_dir_skills` would flag —
+        // it returns `Ok(empty)` for a nonexistent `dir`, which would silently
+        // downgrade a server-authoritative install to a client-authored one
+        // (the exact invariant `shared_skill_registry`'s doc forbids). Reject it
+        // as `Config` (a 500 / failed boot) before the load can flatten it away.
+        if !dir.is_dir() {
+            return Err(crate::OpenCompanyError::Config(format!(
+                "shared skill library at {} is not a directory",
+                dir.display()
+            )));
+        }
+        // `load_dir_skills` reports a parse/validation failure via the same
+        // `DataParse`/`DataInvalid` variants a per-company workflow file uses,
+        // where the HTTP mapping (issue #1017) treats them as the *caller's*
+        // bad input (400/422). Here the "file" is the operator-provisioned
+        // shared library, not anything a caller submitted, so that mapping
+        // would misreport a host misconfiguration as a client error. Recast
+        // as `Config` — already the crate's "runtime setup is broken" variant
+        // (see `app/config.rs`) — so it renders the 500 documented above.
+        let registry: Arc<[SkillDoc]> = load_dir_skills(dir)
+            .map_err(|error| {
+                crate::OpenCompanyError::Config(format!(
+                    "shared skill library at {} failed to load: {error}",
+                    dir.display()
+                ))
+            })?
+            .into();
         // A concurrent caller may have set it first; keep whichever won.
         let _ = self.skill_registry.set(registry.clone());
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
@@ -1413,6 +1440,23 @@ mod tests {
             .skill_registry(std::path::Path::new("/nonexistent"))
             .expect("cached registry");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn skill_registry_rejects_a_configured_but_missing_library() {
+        // A configured `skills_root` that does not exist is a host
+        // misconfiguration. `load_dir_skills` returns `Ok(empty)` for a missing
+        // dir, so without the `is_dir` guard the registry would silently flatten
+        // to empty — downgrading a server-authoritative install to a
+        // client-authored one, the invariant `shared_skill_registry` forbids.
+        let state = AppState::new(AppConfig::default());
+        let err = state
+            .skill_registry(std::path::Path::new("/nonexistent"))
+            .expect_err("a missing configured library must fail, not load empty");
+        assert!(
+            matches!(err, crate::OpenCompanyError::Config(_)),
+            "expected a Config error for a missing library, got {err:?}"
+        );
     }
 
     #[test]

@@ -83,6 +83,45 @@ The reply above is a pause, not a finished answer: this turn reached the maximum
 it may take for a single reply, so it stopped and wrote up where it had got to. Nothing errored — \
 the work so far stands. Reply \"continue\" to ask it to pick up from there.";
 
+/// The system bubble emitted when a turn was halted by its in-turn spend brake
+/// (issue #1032).
+///
+/// The sibling of [`ITERATION_CAP_PAUSE_NOTICE`], and deliberately **not**
+/// interchangeable with it. Both say a turn stopped short, but the operator's
+/// next move is opposite:
+///
+/// - a step pause is resumable — the work fits, the turn just ran out of room,
+///   so `"continue"` finishes it;
+/// - a spend halt is not — the work costs more than the budget allows, and
+///   asking again only spends more against the same cap. So this notice must
+///   never tell the operator to reply `"continue"`; that would invite them to
+///   burn the rest of a budget that had already run out.
+///
+/// It names the teammate and quotes both figures. The iteration-cap notice
+/// deliberately quotes no number, because one bubble can cover a responder, a
+/// desk and a relay turn and naming one of *their* caps would be a number the
+/// operator cannot map back to anything. Naming the teammate is what removes
+/// that objection here: `$X of $Y, by this teammate` is attributable in a way a
+/// bare cap is not.
+///
+/// `spent` can exceed `cap` and the wording allows for it: the brake fires
+/// between tool iterations, so the call that crossed the line was already paid
+/// for. Reporting the real figure is the honest answer — rounding it down to the
+/// cap would hide exactly the overshoot an operator setting a budget wants to
+/// see.
+pub(crate) fn spend_halt_notice(halt: &crate::harness::SpendHalt) -> String {
+    format!(
+        "The reply above is where this turn stopped, not a finished answer: {agent} reached its \
+         spend cap partway through, so the work was halted before it was done. This turn spent \
+         ${spent:.2} against a cap of ${cap:.2}. Nothing errored — the work so far stands, but \
+         asking again runs a new turn against the same cap. Raising {agent}'s budget, or narrowing \
+         what it was asked to do, is what lets the work finish.",
+        agent = halt.agent,
+        spent = halt.spent_usd,
+        cap = halt.cap_usd,
+    )
+}
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -2817,6 +2856,17 @@ impl HarnessBrain {
                     // filed through the same `file_conversation_batch` path
                     // rather than being silently discarded when the claim
                     // releases.
+                    //
+                    // Issue #1032 deliberately does NOT extend this to a spend
+                    // halt, and the omission is the decision rather than an
+                    // oversight. `nudge_for_unpublished` runs ANOTHER model
+                    // turn — that is what makes it a nudge — and the teammate
+                    // this would fire for has just been stopped for running out
+                    // of money. Spending more of a budget that had already run
+                    // out, to tidy up after the brake that enforced it, defeats
+                    // the brake. The spend notice tells the operator the work
+                    // stopped short; deciding whether it is worth more money is
+                    // theirs to make, not this layer's to make for them.
                     if turn.hit_iteration_cap {
                         let changed = cap_scan_baseline.changed_since(&cap_scan_workspace);
                         let unpublished = publish::unpublished(&changed.files, &published_sources);
@@ -2942,6 +2992,31 @@ impl HarnessBrain {
                             channel: "operator".to_string(),
                             agent: None,
                             text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                        });
+                    }
+                    // Issue #1032: and a turn halted for spend says so, in its
+                    // own bubble, for every reason the block above gives —
+                    // sibling not appended (`HarnessPool::run` persists
+                    // `outcome.reply`, so appending would file "you ran out of
+                    // budget" as something the teammate said and recall it
+                    // later), unauthored, no steps.
+                    //
+                    // A separate `if`, not an `else`: one operator message can
+                    // run several turns, so a responder that paused at its step
+                    // cap and a delegate that ran out of money are both true of
+                    // the same bubble, and the operator is owed both facts. They
+                    // cannot both come from ONE turn — #988 pins that a spend
+                    // halt reads `hit_iteration_cap == false` — so this is only
+                    // ever two notices for two different turns.
+                    if let Some(halt) = &turn.halted_for_spend {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: spend_halt_notice(halt),
                             steps: Vec::new(),
                             reply_to: None,
                         });
@@ -8791,6 +8866,7 @@ members = ["eng1", "eng2"]
             reply: "here is what that node does".to_string(),
             steps: Vec::new(),
             hit_iteration_cap: false,
+            halted_for_spend: None,
         });
         assert_eq!(bubble.channel, "operator", "the destination is unchanged");
         assert_eq!(

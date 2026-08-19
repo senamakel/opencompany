@@ -155,6 +155,9 @@ pub mod search;
 #[cfg(test)]
 mod search_turn_test;
 pub mod skills;
+pub mod spend;
+#[cfg(test)]
+mod spend_halt_turn_test;
 pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
@@ -754,6 +757,57 @@ pub struct TurnOutcome {
     /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
     /// would tell the operator to reply "continue" to a turn that never ran.
     pub hit_iteration_cap: bool,
+    /// The in-turn **spend halt**, when one stopped this turn (issue #1032).
+    ///
+    /// `Some` exactly when the teammate declared a `budget_usd_daily`, the
+    /// [`SpendStopHook`](crate::harness::spend::SpendStopHook) armed for it
+    /// fired, and the turn therefore stopped short of the answer it was working
+    /// towards. `None` on every other path, including every turn by a teammate
+    /// who declared no budget — no hook is installed for them, so there is
+    /// nothing that could have halted them.
+    ///
+    /// A **separate** field from [`hit_iteration_cap`](Self::hit_iteration_cap)
+    /// rather than another reading of it, because the two are different
+    /// outcomes needing different operator actions: a step pause is resumable
+    /// with "continue", a spend halt means the work costs more than its budget
+    /// allows and asking again just spends more. #988 pinned that they are
+    /// distinguishable — a budget halt reads `last_turn_hit_cap() == false`,
+    /// because the run paused *below* `max_tool_iterations` — which is why this
+    /// could not be folded into the existing flag.
+    ///
+    /// Carries the figures rather than a bare `bool` so the notice can say what
+    /// was spent against which cap, and names the teammate so a chain of turns
+    /// cannot report a number the operator has no way to attribute.
+    pub halted_for_spend: Option<SpendHalt>,
+}
+
+/// What one in-turn spend halt cost, and whose cap it was measured against
+/// (issue #1032).
+///
+/// The figures are the ones this crate already owns: the cap is
+/// [`CompanyAgent::turn_spend_cap_usd`], and the spend is the sum of the
+/// [`TurnUsage::cost_usd`](crate::harness::cost::TurnUsage::cost_usd) totals the
+/// turn already reports. Deliberately **not** parsed out of the vendored hook's
+/// `reason` string, which is a developer-facing trace line whose shape is
+/// upstream's to change.
+///
+/// `agent` is carried because one operator bubble can cover a responder turn, a
+/// desk turn and a relay turn, each with its own cap. The iteration-cap notice
+/// declines to name a number for exactly that reason; naming the teammate is
+/// what makes a number attributable, and is why this one can be quoted where
+/// that one could not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpendHalt {
+    /// The teammate whose cap was reached.
+    pub agent: String,
+    /// What that teammate's turn had spent when the brake fired, in USD.
+    ///
+    /// Can exceed [`cap_usd`](Self::cap_usd): the brake fires *between* tool
+    /// iterations, so the call that crossed the line has already been paid for.
+    pub spent_usd: f64,
+    /// The cap it was measured against, in USD — the teammate's declared
+    /// `budget_usd_daily`.
+    pub cap_usd: f64,
 }
 
 impl CompanyAgent {
@@ -887,8 +941,22 @@ impl CompanyAgent {
                 control.clone(),
             )));
         }
+        // Issue #1032: the budget hook is *wrapped* rather than pushed bare, so
+        // the halt survives the boundary. Upstream's `StopDecision::Stop` is
+        // consumed inside openhuman's tool loop, which returns the run's text as
+        // an ordinary `Ok(reply)`; `with_stop_hooks` hands back only the
+        // future's value; and `last_turn_hit_cap()` is `false` here by design.
+        // Without the wrapper there is nothing left to read, and a turn stopped
+        // for spend is indistinguishable from one that finished.
+        //
+        // The predicate itself stays upstream's — the wrapper only observes it.
+        let mut spend_brake: Option<(f64, Arc<std::sync::atomic::AtomicBool>)> = None;
         if let Some(cap) = self.turn_spend_cap_usd() {
-            hooks.push(Arc::new(oh::agent::stop_hooks::BudgetStopHook::new(cap)));
+            let hook = crate::harness::spend::SpendStopHook::new(cap);
+            // Taken before the hook is boxed into the task-local list; once it
+            // is an `Arc<dyn StopHook>` the concrete type is unreachable.
+            spend_brake = Some((cap, hook.halted()));
+            hooks.push(Arc::new(hook));
         }
 
         // `Box::pin` at the task-local scope boundary (the nested-scope
@@ -908,7 +976,41 @@ impl CompanyAgent {
                             // Retry-guard edge: skip the one-shot retry when an
                             // operator steer already pends, so a cancel/pause
                             // before any text can't restart the work.
-                            if steer.map(|c| c.requested()).unwrap_or(false) {
+                            //
+                            // Issue #1032 adds the second guard, on the same
+                            // reasoning: the work was stopped on purpose, and an
+                            // empty reply is not licence to restart it. The
+                            // retry is a fresh `agent.turn`, so openhuman builds
+                            // it a fresh `TurnCost` — the brake's accumulator
+                            // starts back at zero, and a teammate that had just
+                            // exhausted its cap could spend up to a whole cap
+                            // again before the hook fired a second time. The
+                            // brake is armed per turn, so nothing else here
+                            // would stop it.
+                            //
+                            // **Defence in depth, not a fix to an observed bug,
+                            // and the difference is recorded so nobody re-derives
+                            // it.** The `Empty` arm appears to be unreachable
+                            // after a halt: a halt implies at least one completed
+                            // tool iteration, and openhuman answers the post-halt
+                            // wrap-up with its own synthesised "here's what I did
+                            // this turn" summary — which it substitutes even when
+                            // the wrap-up call returns blank text OR no choices
+                            // at all. Both were scripted against the real turn
+                            // loop and neither reached this arm, so there is no
+                            // test here that would fail without this guard, and
+                            // one was deliberately not left behind pretending
+                            // otherwise. What the guard buys is that the
+                            // invariant stops depending on that substitution
+                            // staying true across a vendored bump.
+                            //
+                            // `halted_for_spend` below still reports the halt
+                            // either way, so the operator gets the notice that
+                            // explains a stub reply rather than silence.
+                            let spend_halted = spend_brake.as_ref().is_some_and(|(_, halted)| {
+                                halted.load(std::sync::atomic::Ordering::SeqCst)
+                            });
+                            if steer.map(|c| c.requested()).unwrap_or(false) || spend_halted {
                                 Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
                             } else {
                                 let second = agent.turn(message).await;
@@ -962,6 +1064,32 @@ impl CompanyAgent {
                 "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
             );
         }
+        // Issue #1032: read the spend brake the same way. Not under the agent
+        // lock — the flag lives on the hook, not on the vendored session, and
+        // the hook has already finished running by the time `with_stop_hooks`
+        // returns.
+        //
+        // The spend is summed over every attempt's usage rather than read from
+        // the hook, so the figure covers the retry path's second attempt too:
+        // both were paid for, and reporting only one would understate what the
+        // turn actually cost.
+        let halted_for_spend = spend_brake.and_then(|(cap_usd, halted)| {
+            halted
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| SpendHalt {
+                    agent: self.agent_id.clone(),
+                    spent_usd: usages.iter().map(|usage| usage.cost_usd).sum(),
+                    cap_usd,
+                })
+        });
+        if let Some(halt) = &halted_for_spend {
+            tracing::info!(
+                agent = %self.agent_id,
+                spent_usd = halt.spent_usd,
+                cap_usd = halt.cap_usd,
+                "[turn] halted at the in-turn spend cap; the reply stops short of the work it was doing"
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
@@ -970,6 +1098,7 @@ impl CompanyAgent {
                 reply,
                 steps,
                 hit_iteration_cap,
+                halted_for_spend,
             },
             usages,
         ))
@@ -2142,6 +2271,11 @@ impl HarnessPool {
                                 // No model call ran, so no cap was reached
                                 // (issue #926). A refusal is not a pause.
                                 hit_iteration_cap: false,
+                                // And no in-turn hook fired, because no turn
+                                // ran (issue #1032). The reply already IS the
+                                // budget notice; labelling this as a halt too
+                                // would tell the operator the same thing twice.
+                                halted_for_spend: None,
                             });
                         }
                     }
@@ -2388,6 +2522,11 @@ impl HarnessPool {
                                     // No model call ran, so no cap was reached
                                     // (issue #926). A refusal is not a pause.
                                     hit_iteration_cap: false,
+                                    // Same teammate cap, refused BEFORE the
+                                    // turn (issue #1032). The in-turn brake
+                                    // never armed, and the reply above already
+                                    // names the cap it refused against.
+                                    halted_for_spend: None,
                                 });
                             }
                         }

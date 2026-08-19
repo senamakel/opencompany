@@ -204,7 +204,7 @@ export function addConnection(input: AddConnection): ConnectionId {
   const id = remembered?.id ?? mintId();
   const connection: Connection = {
     id,
-    label: input.label ?? remembered?.label ?? hostLabel(baseUrl),
+    label: input.label ?? rememberedLabel(remembered) ?? hostLabel(baseUrl),
     baseUrl,
     defaultCompany,
     credential: input.credential ?? { kind: "cookie" },
@@ -312,13 +312,31 @@ function sameCredential(a: Credential, b: Credential): boolean {
   return true;
 }
 
-export function restoreConnections(transport?: Transport): ConnectionId[] {
+/**
+ * The same-origin console this page load *is*.
+ *
+ * Passed by `App` when the bootstrap host is the origin serving the bundle,
+ * which is every ordinary web deployment. Absent in the desktop, where a
+ * same-origin profile is unreachable and dropped outright by
+ * {@link keepIfReachable}, and in a console pointed elsewhere with `?api=`,
+ * which makes no claim about what lives at its own origin.
+ */
+export interface SameOriginConsole {
+  /** What `?company=` names on this load; `null` for the alias form. */
+  defaultCompany: string | null;
+}
+
+export function restoreConnections(
+  transport?: Transport,
+  sameOrigin?: SameOriginConsole,
+): ConnectionId[] {
   return readProfiles()
     .filter(keepIfReachable)
+    .filter((profile) => isThisConsole(profile, sameOrigin))
     .map((profile) =>
       addConnection({
         baseUrl: profile.baseUrl,
-        label: profile.label,
+        label: rememberedLabel(profile),
         defaultCompany: profile.defaultCompany,
         credential: profile.credential,
         identity: profile.instanceId ? { instanceId: profile.instanceId } : undefined,
@@ -345,6 +363,38 @@ function keepIfReachable(profile: ConnectionProfile): boolean {
   if (isAddressableBaseUrl(profile.baseUrl)) return true;
   forgetProfile(profile.id);
   return false;
+}
+
+/**
+ * Whether a same-origin profile is *this* page load's console, or a past one.
+ *
+ * The second half of issue #1167, and the reason the duplicate row existed at
+ * all. Profiles are keyed on `(baseUrl, defaultCompany)` — deliberately, so
+ * `?company=a` and `?company=b` keep their view state apart (`findProfile`) —
+ * but the empty base url is one host, whichever company a link named. So every
+ * distinct `?company=` ever opened against this origin left a durable profile
+ * behind, and this function is what used to bring all of them back: one row per
+ * company ever visited, all at the same address, all with the same name, and
+ * nothing that ever expired them.
+ *
+ * They are not extra hosts. A connection already carries every company its host
+ * serves, and `switchCompany` moves between them *inside* one console
+ * (`ConnectionConsole.tsx`) — so a second row for the same origin offers an
+ * operator a choice that changes nothing but which of two identical rows is
+ * ticked.
+ *
+ * Skipped rather than forgotten, which is the distinction `retireConnection`
+ * exists for: the profile stays, so opening `?company=b` again lands on the
+ * same connection id and the same scoped state (`scopedKey`) rather than a
+ * freshly minted one.
+ */
+function isThisConsole(
+  profile: ConnectionProfile,
+  sameOrigin: SameOriginConsole | undefined,
+): boolean {
+  if (sameOrigin === undefined) return true;
+  if (profile.baseUrl !== "") return true;
+  return profile.defaultCompany === sameOrigin.defaultCompany;
 }
 
 /** Where a host running inside this application is, and who it is. */
@@ -773,12 +823,58 @@ function labelOf(id: ConnectionId): string {
   return getConnection(id)?.label ?? id;
 }
 
-/** A readable name for a host before it has told us its own. */
+/**
+ * The name every same-origin connection used to carry, and no longer earns.
+ *
+ * Kept as a constant because two things still need to recognise it: the
+ * fallback below, for a runtime with no address to read, and
+ * {@link rememberedLabel}, which has to spot it in a profile written before
+ * issue #1167 and re-derive rather than restore it.
+ */
+export const SAME_ORIGIN_LABEL = "This host";
+
+/**
+ * A readable name for a host before it has told us its own.
+ *
+ * A same-origin host has no url of its own to read, and naming it by a constant
+ * is the whole of issue #1167: *every* such connection came out with the same
+ * name, so a console holding two offered an operator two identical rows in the
+ * host switcher with nothing but the hue of a status dot between them — the
+ * failure `adoptLocalHosts` above was written to end, resurfacing somewhere a
+ * position and a hover title no longer make up for it.
+ *
+ * The origin serving this page is what the connection actually addresses, so it
+ * is both distinguishing and honest. "This host" is only ever true of one row,
+ * and survives here solely for a runtime with no location to read — Node, under
+ * the unit tests — where a label is still required and there is nothing better.
+ */
 export function hostLabel(baseUrl: string): string {
-  if (!baseUrl) return "This host";
+  if (!baseUrl) return sameOriginLabel();
   try {
     return new URL(baseUrl).host;
   } catch {
     return baseUrl;
   }
+}
+
+function sameOriginLabel(): string {
+  const host = typeof window === "undefined" ? "" : (window.location?.host ?? "");
+  return host || SAME_ORIGIN_LABEL;
+}
+
+/**
+ * The remembered name for a host, or `undefined` when it is not worth keeping.
+ *
+ * Installs are durable, so dropping the constant from {@link hostLabel} does
+ * nothing on its own: every console that has already run wrote "This host" into
+ * `oc.connections.v1`, and a remembered label outranks a derived one — so the
+ * indistinguishable name would outlive the fix on exactly the machines that
+ * reported it. A profile still carrying it is therefore treated as carrying
+ * none. Only the same-origin row is treated this way; a host someone typed is
+ * named by its address and could never have been given this label.
+ */
+function rememberedLabel(profile: ConnectionProfile | undefined): string | undefined {
+  if (!profile) return undefined;
+  if (profile.baseUrl === "" && profile.label === SAME_ORIGIN_LABEL) return undefined;
+  return profile.label;
 }

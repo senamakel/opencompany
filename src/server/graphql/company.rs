@@ -16,6 +16,7 @@ use super::finances::FinancesGql;
 use super::inbox::InboxGql;
 use super::memory_facts::{MemoryFactGql, MemoryKindGql};
 use super::pagination::Page;
+use super::policy;
 use super::skills::SkillGql;
 use super::tasks::TaskGql;
 use super::usage::{UsageGql, UsageRangeGql};
@@ -201,6 +202,19 @@ impl CompanyGql {
     /// SMTP status — host/port/username only, never the password.
     async fn smtp(&self) -> async_graphql::Result<SmtpStatusGql> {
         connections::resolve_smtp(&self.runtime).await
+    }
+
+    /// The approval policy in force (issue #1070).
+    ///
+    /// Answers from the same derivation `GET {scope}/policy` uses, so the two
+    /// read surfaces cannot report different tiers for one company. Read-only:
+    /// the write plane stays REST-and-admin-only (issue #562).
+    ///
+    /// This sits beside [`Self::approvals`] on purpose. That field says what is
+    /// parked; this one says whether anything ever parks, and an empty queue
+    /// means opposite things under `supervised` and `full`.
+    async fn policy(&self) -> async_graphql::Result<policy::PolicyGql> {
+        policy::resolve_policy(&self.runtime).await
     }
 
     /// The source-template provenance recorded at launch: the stable template

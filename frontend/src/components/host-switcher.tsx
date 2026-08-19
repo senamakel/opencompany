@@ -57,7 +57,14 @@ import { hostShortcutLabel, useHosts } from "@/connections/HostsContext";
 import type { Connection, ConnectionStatus } from "@/connections/types";
 import { cn } from "@/lib/utils";
 
-/** How a connection's state reads, and what colour says so. */
+/**
+ * How a connection's state reads, and what colour says so.
+ *
+ * The `label` is the load-bearing half and the dot is the shorthand, not the
+ * other way round: a row that is anything but `live` prints its state (issue
+ * #1167), because hue alone tells an operator that *something* differs without
+ * saying what, and tells someone who cannot separate amber from green nothing.
+ */
 const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
   live: { label: "Connected", dot: "bg-status-done" },
@@ -257,7 +264,23 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
               <span className={cn("flex-1 truncate", connection.id === selected && "font-medium")}>
                 {connection.label}
               </span>
-              <span className="sr-only">{status.label}</span>
+              {connection.status === "live" ? (
+                // Nothing to say out loud on a host that is simply working, so
+                // the state stays where a screen reader can still reach it.
+                <span className="sr-only">{status.label}</span>
+              ) : (
+                // In words, not in hue (issue #1167). A colour is no help to
+                // anyone who cannot tell these two apart, and even where it is
+                // read correctly "amber" does not say *what* is wrong —
+                // leaving an operator to discover an unreachable host by
+                // landing on its failure. This is the row telling them first.
+                <span
+                  data-testid={`host-row-state-${connection.id}`}
+                  className="shrink-0 text-xs text-muted-foreground"
+                >
+                  {status.label}
+                </span>
+              )}
               {shortcut && <DropdownMenuShortcut>{shortcut}</DropdownMenuShortcut>}
               {connection.id === selected && <Check className="size-4 shrink-0" />}
             </DropdownMenuItem>

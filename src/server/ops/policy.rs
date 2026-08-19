@@ -70,7 +70,11 @@ use crate::server::users::admin::require_admin;
 ///
 /// A constant rather than prose invented at the call site, so the two write
 /// routes and the read route cannot describe the timing differently.
-const TAKES_EFFECT: &str =
+///
+/// `pub(crate)` for the same reason [`PolicyDto`] is: the GraphQL suite asserts
+/// the field against **this** string rather than a copy of it, so a test cannot
+/// keep passing while the two surfaces quote different timings at an operator.
+pub(crate) const TAKES_EFFECT: &str =
     "on the next turn — a turn already running finishes under the previous tier";
 
 /// Builds the policy route fragment.
@@ -90,13 +94,13 @@ pub fn router() -> Router<AppState> {
 /// drift from the gate it claims to describe.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TierDto {
+pub(crate) struct TierDto {
     /// The `[policy].mode` word.
-    value: &'static str,
+    pub(crate) value: &'static str,
     /// The operator-facing label.
-    label: &'static str,
+    pub(crate) label: &'static str,
     /// What choosing it means, in consequences rather than in tier vocabulary.
-    description: &'static str,
+    pub(crate) description: &'static str,
 }
 
 /// The operator-facing text for every tier this console knows how to describe,
@@ -165,38 +169,44 @@ fn tiers_for(modes: &[&str]) -> Vec<&'static TierDto> {
 }
 
 /// The policy surface as the console reads it.
+///
+/// `pub(crate)` so the GraphQL layer can answer from **this** derivation rather
+/// than recomputing the tier from the record (issue #1070). Two surfaces
+/// resolving one value independently is how they come to disagree — a company
+/// with a console override would report the overridden tier on one and the
+/// manifest's on the other, and a caller has no way to tell which it got.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PolicyDto {
+pub(crate) struct PolicyDto {
     /// The tier actually in force.
-    mode: String,
+    pub(crate) mode: String,
     /// The always-ask list actually in force. The operator's real lever: it
     /// wins over every tier, `full` included.
-    always_approve: Vec<String>,
+    pub(crate) always_approve: Vec<String>,
     /// The manifest's tier, so the console can show what "reset" would restore
     /// rather than describing it abstractly.
-    manifest_mode: String,
+    pub(crate) manifest_mode: String,
     /// The manifest's always-ask list, for the same reason.
-    manifest_always_approve: Vec<String>,
+    pub(crate) manifest_always_approve: Vec<String>,
     /// Whether an operator override is in force. Distinct from comparing the
     /// values: an override that happens to match the manifest is still an
     /// override, and still what `DELETE` would remove.
-    overridden: bool,
+    pub(crate) overridden: bool,
     /// Who set the override, if one is set.
     #[serde(skip_serializing_if = "Option::is_none")]
-    set_by: Option<String>,
+    pub(crate) set_by: Option<String>,
     /// When it was set (epoch millis), if one is set.
     #[serde(skip_serializing_if = "Option::is_none")]
-    set_at_millis: Option<u64>,
+    pub(crate) set_at_millis: Option<u64>,
     /// The selectable tiers with their operator-facing consequences.
-    tiers: Vec<&'static TierDto>,
+    pub(crate) tiers: Vec<&'static TierDto>,
     /// When a change bites. Stated because "stop the flood now" is what an
     /// operator comes here to do, and this is not quite that.
-    takes_effect: &'static str,
+    pub(crate) takes_effect: &'static str,
 }
 
 impl PolicyDto {
-    fn build(record: &CompanyRecord) -> Self {
+    pub(crate) fn build(record: &CompanyRecord) -> Self {
         let effective: Policy = record.effective_policy();
         let manifest = &record.manifest.policy;
         Self {

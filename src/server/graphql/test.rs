@@ -51,12 +51,22 @@ pub(crate) fn manifest() -> CompanyManifest {
 }
 
 pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_manifest(home, manifest()).await
+}
+
+/// [`state_with_company`] over an explicit manifest, for a test that needs the
+/// company configured differently from [`manifest`] and should not have to
+/// restate the whole record to get there.
+pub(crate) async fn state_with_manifest(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
             id: id.clone(),
-            manifest: manifest(),
+            manifest: manifest.clone(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
@@ -73,7 +83,7 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
         .with_id(id.clone())
         .build()
         .await
@@ -166,6 +176,249 @@ async fn approvals_field_is_empty_before_any_park() {
             .unwrap()
             .len(),
         0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The approval tier over GraphQL (issue #1070)
+// ---------------------------------------------------------------------------
+
+/// A company whose always-ask list is **not** empty.
+///
+/// The shared [`manifest`] leaves `always_approve` on its default, which is
+/// `[]` — and two empty lists are indistinguishable however they are wired, so
+/// a suite driven off it could not tell `alwaysApprove` from
+/// `manifestAlwaysApprove`, nor either from a resolver that answered `[]`
+/// unconditionally. The values are the same pair the REST suite uses.
+fn policy_manifest() -> CompanyManifest {
+    toml::from_str(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n",
+    )
+    .unwrap()
+}
+
+/// The tier is readable, and it is the one the manifest declares — together
+/// with the always-ask list, which is the half of the policy that actually
+/// decides what parks.
+///
+/// `Company` already resolved `approvals` and `pendingApprovals` and not the
+/// setting that decides whether anything ever enters that queue — so an empty
+/// queue read the same under `supervised` (nothing pending) and `full` (nothing
+/// will ever park). `full` **with** an always-ask list is a third reading
+/// again, which is why the list is asserted here and not left to the override
+/// case below: a resolver that answered `[]` unconditionally would report this
+/// company as holding nothing back when it holds back two things.
+#[tokio::test]
+async fn policy_field_reports_the_tier_in_force() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_manifest(&home, policy_manifest()).await);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove manifestMode manifestAlwaysApprove overridden } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(policy["mode"], "full", "{value}");
+    assert_eq!(policy["manifestMode"], "full", "{value}");
+    assert_eq!(policy["overridden"], false, "{value}");
+    assert_eq!(
+        policy["alwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "with nothing overriding it the list in force is the manifest's, and it \
+         is reported in the manifest's order: {value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "{value}"
+    );
+}
+
+/// **The anti-drift assertion, and the reason this field maps `PolicyDto`
+/// rather than reading the record itself.**
+///
+/// With a console override in force, `mode` and `manifestMode` diverge — and a
+/// resolver that recomputed the tier from `manifest.policy.mode` would answer
+/// `full` here while `GET {scope}/policy` answered `readonly`, with no way for
+/// a caller to know which surface it had reached. That is the
+/// two-sources-of-truth defect issue #1027 nearly shipped by putting this value
+/// on `/capabilities` instead.
+///
+/// `overridden` is asserted separately from the two words on purpose: an
+/// override that happened to match the manifest would still be an override, and
+/// comparing `mode` with `manifestMode` cannot see one.
+#[tokio::test]
+async fn policy_field_reports_the_override_not_the_manifest() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let store = FsCompanyStore::new(home.clone());
+    let state = state_with_manifest(&home, policy_manifest()).await;
+
+    // Tighten the tier the way `PUT {scope}/policy` does — an overlay, never a
+    // manifest edit. Both fields are overridden, and the list is deliberately
+    // *not* the manifest's: two equal lists cannot show which one each field
+    // was read from.
+    let mut record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    record.overlay_policy = Some(crate::ports::types::PolicyOverride {
+        mode: Some("readonly".to_string()),
+        always_approve: Some(vec!["deploy.production".to_string()]),
+        set_by: crate::ports::types::Actor {
+            kind: crate::ports::types::ActorKind::Operator,
+            id: "ada@example.com".to_string(),
+        },
+        at_millis: 1_700_000_000_000,
+    });
+    store.save(&record).await.unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id: \"acme\") { policy { mode alwaysApprove manifestMode manifestAlwaysApprove overridden setBy setAtMillis } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(
+        policy["mode"], "readonly",
+        "the tier IN FORCE is the override, not the manifest: {value}"
+    );
+    assert_eq!(
+        policy["manifestMode"], "full",
+        "and the manifest's tier is still reported, so a client can see what a reset restores: {value}"
+    );
+    assert_eq!(
+        policy["alwaysApprove"],
+        serde_json::json!(["deploy.production"]),
+        "the list IN FORCE is the override's too — and it is the lever that wins \
+         over every tier, `full` included, so reading it from the manifest here \
+         would report a company as holding back two things it does not: {value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"],
+        serde_json::json!(["payment.send", "filing.submit"]),
+        "while the manifest's list is what a reset restores. The two fields \
+         disagree on purpose: equal lists could not tell them apart, nor tell \
+         either from the other being returned twice: {value}"
+    );
+    assert_eq!(policy["overridden"], true, "{value}");
+    assert_eq!(policy["setBy"], "ada@example.com", "{value}");
+    assert_eq!(
+        policy["setAtMillis"], 1_700_000_000_000_f64,
+        "epoch millis survive the f64 widening exactly: {value}"
+    );
+}
+
+/// The two fields a client renders a policy *control* from: the tiers it may
+/// offer, and what it has to tell an operator about when a change bites.
+///
+/// Neither varies with the company, which is why they are asserted once here
+/// rather than in both cases above. `tiers` is not the text table — it is that
+/// table narrowed to `POLICY_MODES` and ordered by it, so the console offers
+/// exactly what this runtime accepts; offering a tier the gate would silently
+/// downgrade is the failure it exists to prevent. `takesEffect` is the single
+/// constant `GET`, `PUT` and `DELETE` all answer with, so an operator cannot be
+/// quoted two different timings by two surfaces — the same one-derivation rule
+/// the rest of this field follows.
+#[tokio::test]
+async fn policy_field_reports_the_selectable_tiers_and_when_a_change_takes_effect() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_manifest(&home, policy_manifest()).await);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id: \"acme\") { policy { tiers { value label description } takesEffect } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+
+    let tiers = policy["tiers"].as_array().expect("tiers");
+    let offered: Vec<&str> = tiers
+        .iter()
+        .map(|tier| tier["value"].as_str().expect("tier value"))
+        .collect();
+    assert_eq!(
+        offered,
+        crate::company::POLICY_MODES.to_vec(),
+        "the tiers offered are the ones the runtime accepts, in its order: {value}"
+    );
+    for tier in tiers {
+        assert!(
+            !tier["label"].as_str().unwrap_or_default().is_empty()
+                && !tier["description"].as_str().unwrap_or_default().is_empty(),
+            "tier `{}` came back without operator-facing text, which is the whole \
+             point of sending tiers rather than mode names: {value}",
+            tier["value"]
+        );
+    }
+
+    // One tier pinned exactly. `value`, `label` and `description` are three
+    // adjacent `String`s: a mapping that swapped them would leave every
+    // assertion above green while showing an operator a tier name where the
+    // consequences should be.
+    let readonly = tiers
+        .iter()
+        .find(|tier| tier["value"] == "readonly")
+        .expect("the readonly tier");
+    assert_eq!(readonly["label"], "Read-only", "{value}");
+    assert_eq!(
+        readonly["description"],
+        "The agents can look at things but change nothing and spend nothing.",
+        "{value}"
+    );
+
+    assert_eq!(
+        policy["takesEffect"],
+        crate::server::ops::policy::TAKES_EFFECT,
+        "asserted against the constant itself, not a copy of its wording: the \
+         property is that GraphQL quotes the *same* timing REST does, and a \
+         copy here would let the two drift apart while staying green: {value}"
+    );
+    assert!(
+        !policy["takesEffect"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "and it is actually said, rather than the field existing and being blank: {value}"
+    );
+}
+
+/// **Auth parity with REST.** `GET {scope}/policy` answers 401 to an
+/// unauthenticated caller; this must not be the softer way in.
+///
+/// Tested rather than assumed. The gate lives in `graphql_handler` *before*
+/// `schema().execute()`, so no resolver runs at all — but "the framework covers
+/// it" is exactly the reasoning that ships a hole, and nothing in this suite
+/// exercised the refusal before now. The same query minus the session cookie
+/// every other test sends must return the error and no policy data.
+#[tokio::test]
+async fn policy_field_is_refused_without_a_session() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_company(&home).await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                // Deliberately no `cookie` header — the one difference from
+                // `query()`.
+                .body(Body::from(
+                    r#"{"query":"{ company(id: \"acme\") { policy { mode } } }"}"#.to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        value["data"]["company"].is_null(),
+        "an unauthenticated caller must get no policy data: {value}"
+    );
+    assert_eq!(
+        value["errors"][0]["message"], "unauthorized",
+        "and must be told why, the same as the REST 401: {value}"
     );
 }
 

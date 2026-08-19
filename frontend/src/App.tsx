@@ -174,7 +174,18 @@ function Console() {
       // Hosts added in a previous session come back first, so the bootstrap add
       // below finds its own profile already registered and reuses that entry
       // rather than creating a duplicate row for one host.
-      restoreConnections();
+      //
+      // Told which same-origin console this load is, so the rows a *previous*
+      // one left behind stay out of the switcher. A link carrying `?company=`
+      // writes its own profile at the same (empty) address, so restoring every
+      // one of them put an identical row in the menu for every company ever
+      // opened here — issue #1167. Only when the bootstrap is same-origin: a
+      // console pointed elsewhere with `?api=` claims nothing about what lives
+      // at its own origin.
+      restoreConnections(
+        undefined,
+        config.baseUrl === "" ? { defaultCompany: config.company } : undefined,
+      );
       // `null` in the desktop, which has no host at its own origin and never
       // will — see `isAddressableBaseUrl`. Adding one anyway is what made the
       // packaged app open on a connection that could not work and select it,

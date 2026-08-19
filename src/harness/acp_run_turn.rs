@@ -206,6 +206,11 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         // protocol carries no iteration-cap signal — there is nothing to read,
         // and inventing `true` here would label every ACP reply a pause.
         hit_iteration_cap: false,
+        // Issue #1032: nor is there a spend halt to report. The stop hooks are
+        // installed around THIS crate's `agent.turn`, and an ACP turn does not
+        // run through it — the external process bills and stops on its own
+        // terms, which this side neither arms nor observes.
+        halted_for_spend: None,
     }
 }
 
