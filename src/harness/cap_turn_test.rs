@@ -363,9 +363,6 @@ fn chat(text: &str) -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
     }
 }
 

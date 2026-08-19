@@ -76,6 +76,15 @@ let teamWriteAvailable = true;
  */
 let deskAddAvailable = true;
 
+/**
+ * Makes `GET .../desks` fail from the moment a teammate is created, so the
+ * create-landed-then-read-back-failed case is reachable. The write still
+ * succeeds — that is the point: the host has the teammate and the console
+ * cannot see them.
+ */
+let desksReadFailsAfterCreate = false;
+let desksReadable = true;
+
 /** The host's desks, as this stub holds them. Mutated by the write routes. */
 let desks: Desk[] = [];
 
@@ -84,6 +93,8 @@ function reset() {
   roster = [...ROSTER];
   teamWriteAvailable = true;
   deskAddAvailable = true;
+  desksReadFailsAfterCreate = false;
+  desksReadable = true;
   desks = [
     {
       id: "engineering",
@@ -216,6 +227,7 @@ async function mockApi(page: Page) {
         desks = [...desks, created];
         return json(created, 201);
       }
+      if (!desksReadable) return json({ error: "unavailable" }, 500);
       return json(desks);
     }
 
@@ -234,6 +246,7 @@ async function mockApi(page: Page) {
       };
       roster = [...roster, created];
       writes.push({ method, path, body });
+      if (desksReadFailsAfterCreate) desksReadable = false;
       return json(created, 201);
     }
     if (path.endsWith("/team")) return json(roster);
@@ -567,6 +580,39 @@ test("#1099 a teammate added from the company page is confirmed by name", async 
   // through sonner's own type attribute so the two cannot be confused by
   // wording alone.
   await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
+});
+
+test("#1099 a teammate the chart cannot read back is not confirmed as added", async ({
+  page,
+}) => {
+  // The host takes the teammate and then the chart's own read fails. `boot`
+  // swallows that — it has to, the chart has an error state and a Retry — so
+  // without the check the console toasted "Added Grace Murray." over a banner
+  // saying the chart could not be loaded.
+  desksReadFailsAfterCreate = true;
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Grace Murray");
+  await dialog.getByLabel("Role").fill("Compiler");
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
+
+  const notice = toasts(page).first();
+  await expect(notice).toContainText("Added Grace Murray, but");
+  await expect(notice).toContainText("chart couldn't be read back");
+  await expect(notice).toHaveAttribute("data-type", "warning");
+  // The teeth: nothing anywhere claims the clean add. `Added Grace Murray.`
+  // with a full stop is the exact string the success arm produces.
+  await expect(page.getByText("Added Grace Murray.", { exact: true })).toHaveCount(0);
+  // And the write really did land, so this is the honest half-landing rather
+  // than a failure being reported as one.
+  expect(
+    writes.find(
+      (write) => write.method === "POST" && write.path.endsWith("/team"),
+    ),
+  ).toBeTruthy();
 });
 
 test("#311 the lead can be changed from the chart and survives a reload", async ({

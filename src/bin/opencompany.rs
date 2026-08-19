@@ -70,6 +70,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Report companies whose durable owner row is missing, and owner rows
+    /// naming no company (issue #1077).
+    ///
+    /// Read-only. A company with no owner row is unreachable by its own tenant
+    /// — every tenant-scoped request for it answers 403 — and nothing else in
+    /// the product will tell you it exists. Repairing one is deliberately not
+    /// offered: adopting it means guessing its tenant, and a wrong guess hands
+    /// one tenant's company to another.
+    ///
+    /// Separate from `doctor` on purpose: `doctor` explains configuration and
+    /// needs no database, and making it open storage would leave it unable to
+    /// answer at all when the backend is the thing that is broken.
+    Orphans {
+        /// Data root, for backends that resolve one. Defaults the same way
+        /// `serve` does.
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Print the report as JSON instead of aligned text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Export a company's bundle: read everything through the storage ports and
     /// write the canonical filesystem layout. With `--features export` the output
     /// is a single `.tar`; otherwise an unpacked bundle directory. Secrets and
@@ -832,6 +853,92 @@ async fn run_export(
     Ok(())
 }
 
+/// `opencompany orphans` — the on-demand form of the boot check (issue #1077).
+///
+/// Opens storage, reads the two collections, and prints the set difference both
+/// ways. Nothing is written.
+///
+/// Only meaningful in tenant-namespace mode: without
+/// [`OPENCOMPANY_TENANT_ID`], no durable owner rows are ever written, so the
+/// report would show every company as orphaned on every invocation. Refuses
+/// to run when the variable is unset.
+///
+/// # Exit code
+///
+/// Zero whether or not orphans were found. This is a report, not an assertion:
+/// a non-zero exit would make the command unusable in the one place it is most
+/// wanted — a health check or a deploy script that wants the *answer* — and
+/// "the query ran and found three" is a success, not a failure. The findings
+/// are on stdout for a human and behind `--json` for anything else.
+async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
+    // Gate on OPENCOMPANY_TENANT_ID: the same condition that gates the
+    // durable owner-row write at register_company. Without a tenant
+    // namespace no owner rows are ever persisted, and reading zero owners
+    // against N companies would report every company as orphaned.
+    let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if let Some(tenant) = &tenant_id {
+        // A namespace containing the `--` id delimiter would make the
+        // `<tenant>--` prefix ambiguous between tenants (see
+        // `validate_tenant_namespace`). Reject it here, the boundary that
+        // reads the variable.
+        if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+            return Err(opencompany::error::OpenCompanyError::Config(reason));
+        }
+    }
+    if tenant_id.is_none() {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "OPENCOMPANY_TENANT_ID is not set: this deployment does not persist \
+             durable owner rows, so no company can be orphaned from one. \
+             This check applies to shared-database deployments only."
+                .into(),
+        ));
+    }
+
+    let home = resolve_home_migrated(home)?;
+    let settings = opencompany::store::StorageSettings::from_env()?;
+    let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
+        // `StorageKind::Fs` yields no handles at all, so there is no `owners`
+        // collection and this condition cannot arise. Say that plainly rather
+        // than printing an empty report, which would read as "checked, all
+        // clear" for a check that never ran.
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "storage backend `{:?}` keeps no ownership rows, so no company can be orphaned from \
+             one. This check applies to shared-database deployments.",
+            settings.kind
+        )));
+    };
+    let Some(ownership) = handles.ownership.as_ref() else {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "storage backend `{:?}` is open but persists no company -> tenant ownership, so there \
+             is nothing to reconcile.",
+            settings.kind
+        )));
+    };
+
+    // Read list() before owners() (issue #1077): provisioning writes the
+    // owner row before the company (#1050), so a provision crossing the
+    // two reads lands as a benign dangling owner row rather than an
+    // alarming unowned company.
+    let companies = handles.company.list().await?;
+    let owners = ownership.owners().await?;
+    let report = opencompany::app::find_orphans(&companies, &owners);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else if report.is_empty() {
+        println!(
+            "No orphans: {} companies, {} owner rows, every one accounted for.",
+            companies.len(),
+            owners.len()
+        );
+    } else {
+        print!("{}", report.to_text());
+    }
+    Ok(())
+}
+
 /// Feature build: export writes a single-file `.tar`.
 #[cfg(feature = "export")]
 async fn run_export(
@@ -1110,6 +1217,16 @@ async fn async_main() -> Result<()> {
             let tenant_namespace = std::env::var("OPENCOMPANY_TENANT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            if let Some(tenant) = &tenant_namespace {
+                // A namespace containing the `--` id delimiter would make the
+                // `<tenant>--` prefix ambiguous between tenants (see
+                // `validate_tenant_namespace`), so a shared-DB workload with
+                // one would namespace ids that collide with another tenant's.
+                // Refuse to boot rather than misattribute at runtime.
+                if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+                    return Err(opencompany::error::OpenCompanyError::Config(reason));
+                }
+            }
             // The address the platform records as this instance's creator. A
             // provisioned company's manifest names no admin, so without this
             // nobody is eligible to log in and there is no operator token to
@@ -1239,7 +1356,58 @@ async fn async_main() -> Result<()> {
                 // regardless, since the registry only holds locally-loaded ones).
                 if let Some(ownership) = &handles.ownership {
                     let self_tenant = state.config().tenant_namespace.clone();
-                    for (id, tenant) in ownership.owners().await? {
+                    // Issue #1077: report companies orphaned from their tenant.
+                    //
+                    // A company whose owner row is missing is unreachable by its
+                    // own tenant — `authorize_address` finds no owner and answers
+                    // 403 — and until now nothing anywhere reported it. #1050's
+                    // fix stopped provisioning creating new ones; it does nothing
+                    // for the rows the old behaviour already left behind.
+                    //
+                    // Gated on tenant_namespace: only tenant-namespace mode writes
+                    // durable owner rows at all, and without it every company
+                    // would appear orphaned on every boot. The gate also spares
+                    // non-namespaced deployments the whole-collection scan the
+                    // report needs.
+                    //
+                    // Read list() BEFORE owners() (issue #1077): provisioning
+                    // writes the owner row before the company (#1050), so a
+                    // provision crossing the two reads lands as a benign dangling
+                    // owner row rather than an alarming unowned company.
+                    let companies = if self_tenant.is_some() {
+                        match handles.company.list().await {
+                            Ok(c) => Some(c),
+                            // A failed listing must not abort a boot that would
+                            // otherwise succeed: this is a diagnostic, and the
+                            // server is perfectly able to serve every company
+                            // whose ownership *is* intact without it.
+                            Err(e) => {
+                                eprintln!("warning: could not check company ownership: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let owners = ownership.owners().await?;
+                    if let (Some(me), Some(companies)) = (&self_tenant, &companies) {
+                        // Filtered to this workload's own tenant: in
+                        // shared-single-DB the `owners` collection holds every
+                        // tenant's rows, and printing them all to one tenant
+                        // pod's stderr would leak other tenants' company ids and
+                        // tenant strings. `opencompany orphans` is the
+                        // unfiltered, platform-scoped form.
+                        let report = opencompany::app::find_orphans(companies, &owners);
+                        let filtered = opencompany::app::filter_to_tenant(report, me);
+                        if !filtered.is_empty() {
+                            eprintln!(
+                                "warning: ownership rows and companies disagree \
+                                 (`opencompany orphans` for this report)\n{}",
+                                filtered.to_text()
+                            );
+                        }
+                    }
+                    for (id, tenant) in owners {
                         match &self_tenant {
                             // Compare in canonical (bare-slug) form so a row
                             // persisted as `tenant:acme` still hydrates under the
@@ -1454,6 +1622,7 @@ async fn async_main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Orphans { home, json }) => run_orphans(home, json).await,
         Some(Command::Export {
             company,
             out,
@@ -1738,5 +1907,31 @@ mod test {
             "path is the template basename, not the absolute host path"
         );
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Issue #1077: the `orphans` command refuses to run without a tenant
+    /// namespace.
+    ///
+    /// Without `OPENCOMPANY_TENANT_ID` no durable owner rows are ever written,
+    /// so the report would claim every company is orphaned on every run. The
+    /// gate is the same condition that guards the owner-row write at
+    /// `register_company`, and it fires before storage is even opened — the
+    /// reviewer's false-positive case, with no database needed to hit it.
+    #[tokio::test]
+    async fn orphans_refuses_to_run_without_a_tenant_namespace() {
+        // Save and restore so a box configured for shared-single-DB (or a
+        // parallel test) is unaffected.
+        let previous = std::env::var("OPENCOMPANY_TENANT_ID").ok();
+        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
+        let err = run_orphans(None, false).await.unwrap_err();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", value) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
+        }
+
+        assert!(
+            matches!(&err, opencompany::error::OpenCompanyError::Config(_)),
+            "expected a Config refusal, got: {err:?}"
+        );
     }
 }

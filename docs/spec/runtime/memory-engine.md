@@ -18,6 +18,7 @@ dedicated memory engine layered on top of that base. The base still owns every o
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
 | `embedded` (or `tinycortex`) | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
+| `embedded` + `OPENCOMPANY_MEMORY_DRIVER=namespace` | In-pod contract store | `tinymemory-embedded` | `tinymemory-core`'s durable `UnifiedMemory`, bound through the `MemoryProvider` contract; no network call |
 | `remote` | A hosted memory service | `tinymemory` | Bound through the `MemoryProvider` contract; needs a URL and a credential |
 | `null` | Nothing | `tinymemory` | Writes accepted and discarded, reads empty |
 
@@ -32,30 +33,20 @@ back out (`/spec` says `embedded`), so a client never has to know both.
 
 | Env var | Required | Notes |
 |---|---|---|
-| `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE` | yes | The operator accepting that the hosted adapters are not conformance-proven. See below. |
 | `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, or `cognee`. No default — see below. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
 
-### `remote` refuses until you accept an unproven adapter
+### `remote` is conformance-backed
 
-`remote` routes a company's **entire memory** at a third-party HTTP service.
-The adapters that speak to those services are covered upstream by a handful of
-happy-path tests — no error mapping, no pagination, no taint preservation, no
-`Unsupported` behaviour. tinymemory#18 §E1 names a driver conformance suite as
-the gate for turning this on at all, and until that suite runs against those
-adapters, "it compiled" is the strongest available claim about them.
-
-So the mode exists, refuses by default, and lifts on
-`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1`. Same shape as
-`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`, and for the same reason: a memory engine
-that loses provenance or silently drops a page fails in ways nothing surfaces
-until the memory is needed, which is far too late to notice.
-
-This is a gate on *confidence*, not on configuration, so it is meant to be
-deleted rather than lived with. When the conformance suite covers the hosted
-adapters, the flag and its refusal go — and `remote` becomes an ordinary choice
-needing only a driver, a URL, and a credential.
+The unproven-remote acceptance flag that used to guard this mode is retired,
+exactly as its own text promised: it was a gate on *confidence*, meant to be
+deleted rather than lived with, and its premise — no driver conformance suite
+(tinymemory#18 §E1) — stopped being true when the vendored tinymemory gained
+one. The suite now runs against every driver, the remote adapters carry
+failure-path tests (error mapping, malformed responses), and the bind-time
+capability audit asserts the advertised families match the reachable surface
+on every boot. `remote` is an ordinary choice: a driver, a URL, a credential.
 
 **Every one of these refuses at boot when missing, naming the knob.** There is
 deliberately no fall back to the embedded engine. A company that believes it is
@@ -126,24 +117,40 @@ and OpenHuman's own inlined contract documents `tinycortex-api` as a deprecated
 re-export. The `tinycortex` crate remains pinned as the *engine* behind the
 embedded mode; only the contract moved.
 
-## Why `embedded` does not go through the provider seam
+## `embedded` through the provider seam (`namespace`)
 
-`remote` and `null` bind a provider. `embedded` keeps the `EngineCortex` overlay
-it has always had, and that is a durability decision rather than an unfinished
-edge.
+`remote` and `null` bind a provider. Plain `embedded` keeps the `EngineCortex`
+overlay it has always had — today's companies have their data in those tables,
+and swapping the default out from under them would strand it. But the mode is
+no longer *confined* to that overlay: `OPENCOMPANY_MEMORY_DRIVER=namespace`
+binds `tinymemory-core`'s `UnifiedMemory` — the contract's own durable SQLite
+store, whose `Memory` implementation reports `name() == "namespace"` — through
+the same seam as the hosted engines. Same registry admission (the id is
+host-reserved at class `Embedded`), same bind-time capability audit, same
+`BoundMemory` tenant-namespace facades, full three-port overlay with the
+inbound-taint and scratch partitions. No network call; the store persists
+under `<OPENCOMPANY_DATA_DIR>/memory-namespace/` — beside, never inside, the
+incumbent engine's `memory/`, and nothing migrates between the two. An
+operator who switches starts that store empty.
 
-The obvious construction — `tinymemory_tinycortex::provider(…)` over a
-`tinycortex::memory::Memory` backend — cannot currently be durable. The only
-concrete `Memory` implementation in the vendored engine is `InMemoryMemoryStore`,
-a `BTreeMap` behind an `RwLock`. Binding it would swap the per-company SQLite
-workspaces under `<data_dir>/memory/` for a store that is empty after every
-restart, and would do so *silently*: every read would succeed, returning
-nothing. This page already documents a hard boot refusal for exactly that class
-of failure (see the `/data`-is-scratch caveat below), so introducing it through
-a contract migration would be a strange thing to do.
+It rides the `tinymemory-embedded` feature (which implies `tinymemory`),
+separate on purpose: the store lives in `tinymemory-core`, which pulls the
+in-pod engine weight — `tinycortex` and a bundled SQLite — that a
+hosted-memory tenant deliberately builds without (tinymemory#18 §D). Selecting
+the driver without the feature refuses at boot, naming the feature; naming any
+other driver id under `embedded` refuses too, never a silent fallback to the
+engine the operator did not ask for. The `/data`-is-scratch durability refusal
+below applies to this store exactly as it does to `EngineCortex`, and there is
+no in-memory fallback when the data dir is missing.
 
-Moving the embedded engine onto the seam needs a durable `Memory` implementation
-over the engine's KV tier first.
+Recall honesty: no embedding backend is injected, so every chunk is stored
+vector-less and recall runs on the store's graph and keyword tiers. That is
+the same loud degraded-mode contract `EngineCortex` ships under.
+
+The earlier form of this section said the seam needed "a durable `Memory`
+implementation over the engine's KV tier first". `UnifiedMemory` is that
+implementation — it was the store, not the engine's KV tier, that supplied
+it.
 
 ## Tenant isolation across the seam
 

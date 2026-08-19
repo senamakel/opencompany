@@ -22,6 +22,7 @@ import {
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
+import type { MemorySpec } from "@/api/types";
 import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -150,6 +151,29 @@ export function MemoryView({ client, company }: Props) {
     };
   }, [load]);
 
+  // The bound memory engine, from the unauthenticated /spec handshake. Shown
+  // so an operator can see which engine is live and — for a remote driver
+  // serving only the mandatory families — what it does NOT support, before a
+  // cycle discovers it. undefined = host predates the field; render nothing.
+  const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    // Clear first: on a client swap the old badge would otherwise survive a
+    // failed /spec and name the wrong host.
+    setEngine(undefined);
+    client
+      .spec()
+      .then((spec) => {
+        if (live) setEngine(spec.memory);
+      })
+      .catch(() => {
+        /* spec is best-effort here; the Brain view works without it */
+      });
+    return () => {
+      live = false;
+    };
+  }, [client]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return entries
@@ -198,9 +222,27 @@ export function MemoryView({ client, company }: Props) {
               teammates can recall.
             </p>
           </div>
-          <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
-            <Plus className="size-4" /> New memory
-          </Button>
+          <div className="flex items-center gap-3">
+            {engine && engine.backend !== "store" && (
+              <span
+                className="rounded-full border px-3 py-1 text-xs text-muted-foreground"
+                title={
+                  engine.capabilities.length
+                    ? `Capability families: ${engine.capabilities.join(", ")}`
+                    : "Capabilities not negotiated"
+                }
+                data-testid="memory-engine-badge"
+              >
+                engine: {engine.driver_id ?? engine.backend}
+                {engine.capabilities.length > 0 && (
+                  <> · {engine.capabilities.length} families</>
+                )}
+              </span>
+            )}
+            <Button onClick={() => setAddOpen(true)} data-testid="memory-add">
+              <Plus className="size-4" /> New memory
+            </Button>
+          </div>
         </div>
 
         {error && (

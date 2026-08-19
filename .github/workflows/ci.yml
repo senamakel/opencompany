@@ -1136,6 +1136,22 @@ jobs:
       - name: Test the memory engine selection surface
         run: scripts/ci/run-scoped-suite.sh "tinymemory selection" acp,runner,tinymemory store::select
 
+      # Issue #1113. `tinymemory-embedded` is the in-pod contract driver:
+      # `OPENCOMPANY_MEMORY=embedded` + `OPENCOMPANY_MEMORY_DRIVER=namespace`
+      # binds `tinymemory-core`'s durable `UnifiedMemory` through the same
+      # provider seam as the hosted engines. A separate feature from
+      # `tinymemory` — it deliberately links the in-pod engine weight (bundled
+      # SQLite) that the two steps above exist to keep OUT of the contract-only
+      # build — so its gated tests (the durable bind-store-reopen round trip in
+      # `store::memory`, the routing and ephemeral-data-dir refusals in
+      # `store::select`) are compiled by `Check (--all-features)` and executed
+      # only here.
+      - name: Test the embedded contract driver
+        run: scripts/ci/run-scoped-suite.sh "tinymemory embedded contract" acp,runner,tinymemory-embedded store::memory
+
+      - name: Test the embedded contract driver selection
+        run: scripts/ci/run-scoped-suite.sh "tinymemory embedded selection" acp,runner,tinymemory-embedded store::select
+
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
       # `tinyplace`-gated line and deliberately runs none of them, and no other

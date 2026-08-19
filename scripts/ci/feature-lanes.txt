@@ -50,6 +50,7 @@ platform-jwt   | tested       | (default)                       | In the default
 openhuman      | tested       | openhuman,tinycortex            | `rust-gated` runs `--tests`, which selects lib+bin units and every tests/ target.
 tinycortex     | tested       | openhuman,tinycortex            | Same lane, same unfiltered `--tests`.
 tinymemory     | partial      | acp,runner,tinymemory | store::memory store::select
+tinymemory-embedded | partial | acp,runner,tinymemory-embedded | store::memory store::select
 tinyplace      | tested       | tinyplace                       | Runs the whole `--lib` deliberately (issue #477) — it gates code across the tree.
 
 # --- Partial: a lane exists, but filtered ----------------------------------

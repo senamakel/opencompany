@@ -185,6 +185,9 @@ pub struct CompanyMail {
 /// A running company: its brain, stores, channels, and policy gate, wired
 /// together behind a serial cycle loop.
 pub struct CompanyRuntime {
+    /// Whether this runtime has already said that it cannot dispatch
+    /// (issue #1059). Latched so a board with many cards says it once.
+    pub(crate) inert_board_reported: std::sync::atomic::AtomicBool,
     pub(crate) id: CompanyId,
     pub(crate) brain: Arc<dyn Brain>,
     pub(crate) store: Arc<dyn CompanyStore>,
@@ -407,6 +410,7 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
+            inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
             // resolved config (`set_default_mcp_servers`) rather than taken as a
             // 19th positional argument here.
@@ -660,6 +664,37 @@ impl CompanyRuntime {
     }
 
     /// This company's live set of cancellable workflow runs (issue #383).
+    /// Whether this company is doing anything the platform must not interrupt.
+    ///
+    /// Three sources, because no one of them sees all the work — the first
+    /// version of this shipped only the third and missed the case
+    /// opencompany-microservice#22 actually measured.
+    ///
+    /// - **[`serial`](Self::serial)**, the per-company cycle lock. This is the
+    ///   broad one: a top-level operator chat turn takes it and registers
+    ///   nothing else, and `chat_and_emit` detaches that turn onto its own task
+    ///   precisely because it outlives reverse-proxy timeouts. Webhook, telegram
+    ///   and mailbox-poller cycles take it too. A `tokio::Mutex`, so `try_lock`
+    ///   is free and never blocks the caller.
+    /// - **[`run_supervisor`](Self::run_supervisor)**, covering workflow runs —
+    ///   the manual run route, the cron scheduler, approved-gate continuations
+    ///   and the orchestrator's `run_workflow` tool. It is a separate registry
+    ///   and the other two never see it.
+    /// - **[`steer`](Self::steer)**, the in-flight registry, for dispatched board
+    ///   cards and desk delegations, which run *inside* a cycle and so would
+    ///   otherwise be covered — it is kept for the case where a turn's steerable
+    ///   run outlives the cycle that started it.
+    ///
+    /// Cheap by construction: a non-blocking `try_lock`, a map emptiness check,
+    /// and one `std::sync::Mutex` acquisition. The platform calls this once per
+    /// idle tenant per reconcile scan against a short timeout, so anything that
+    /// could block would turn a slow company into a stalled sweep.
+    pub fn is_busy(&self) -> bool {
+        self.serial.try_lock().is_err()
+            || !self.run_supervisor.is_empty()
+            || self.steer.any_inflight()
+    }
+
     pub fn run_supervisor(&self) -> &crate::runtime::RunSupervisor {
         &self.run_supervisor
     }
@@ -894,6 +929,30 @@ impl CompanyRuntime {
         // `in_progress` until a harness cycle (or a human) advances it. No run is
         // minted either — nothing is attempting the card, so an attempt row would
         // be a fiction.
+        //
+        // Issue #1059: say so, once. Dispatching is where the intent shows —
+        // somebody dragged a card into In Progress and is waiting for work — and
+        // until now this returned in silence, so the card simply sat there with
+        // no run, no timeline and nothing in the log to grep for. The builder is
+        // the wrong place to say it: ~200 callers build a runtime with no harness
+        // on purpose and never dispatch, so a warning there is noise on every one
+        // of them and absent from the only case that is a mistake.
+        //
+        // Latched, because an inert board with fifty cards has one problem, not
+        // fifty.
+        if !self
+            .inert_board_reported
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                company = %self.id,
+                task = %task.id,
+                "[board] a card was dispatched but this runtime has no agent pool, so nothing \
+                 will work it: the card stays in `in_progress` with no attempt row. Wire one with \
+                 `RuntimeBuilder::with_harness(...)` (see `src/bin/opencompany.rs`), or move the \
+                 card by hand. Reported once per runtime."
+            );
+        }
         let _ = task;
     }
 
@@ -2933,7 +2992,70 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "openhuman")]
+    /// `is_busy` must see **all three** sources, not just the steer registry.
+    ///
+    /// The first version of the busy endpoint read only `steer.any_inflight()`,
+    /// which covers dispatched board cards and desk delegations. A top-level
+    /// operator chat turn registers none of those — it takes `serial` and
+    /// nothing else — and workflow runs live in `run_supervisor`, a separate
+    /// registry. So the 15-minute turn opencompany-microservice#22 measured
+    /// reported `busy: false` and got parked mid-flight, which is exactly the
+    /// failure the endpoint exists to prevent.
+    ///
+    /// Each source is exercised idle → busy → idle independently, so dropping
+    /// any one of them from `is_busy` fails here rather than silently in
+    /// production. Deliberately outside any feature gate: the steer registry is
+    /// only wired under `openhuman`, so a test that relied on it alone would not
+    /// run in the default build at all.
+    #[tokio::test]
+    async fn is_busy_sees_every_source_of_work() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        assert!(!runtime.is_busy(), "an idle runtime must not report busy");
+
+        // 1. The cycle lock — the operator-chat case the steer registry misses.
+        {
+            let _cycle = runtime.serial.lock().await;
+            assert!(
+                runtime.is_busy(),
+                "a turn holding the cycle lock must report busy"
+            );
+        }
+        assert!(!runtime.is_busy(), "releasing the cycle lock must clear it");
+
+        // 2. A workflow run — tracked in its own registry, invisible to both
+        //    the cycle lock and the steer registry.
+        {
+            let (_ctx, _run) = runtime
+                .run_supervisor()
+                .begin("wf-1", false)
+                .expect("begin a workflow run");
+            assert!(runtime.is_busy(), "a live workflow run must report busy");
+        }
+        assert!(
+            !runtime.is_busy(),
+            "the run guard must clear it on drop, or the tenant never parks again"
+        );
+
+        // 3. A steerable in-flight run — the original signal, kept because a
+        //    dispatched card can outlive the cycle that started it.
+        {
+            let _guard = runtime.steer().register(
+                runtime.id(),
+                crate::company::steer::InflightEntry {
+                    key: "run-1".to_string(),
+                    task_id: Some("run-1".to_string()),
+                    kind: crate::company::steer::InflightKind::Task,
+                    title: "Ship the thing".to_string(),
+                    agent_id: "ceo".to_string(),
+                    started_at_millis: 0,
+                    pending_action: None,
+                },
+            );
+            assert!(runtime.is_busy(), "a registered steer run must report busy");
+        }
+        assert!(!runtime.is_busy(), "the steer guard must clear it on drop");
+    }
+
     async fn runtime_and_record() -> (
         super::CompanyRuntime,
         crate::ports::CompanyRecord,

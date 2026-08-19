@@ -71,8 +71,13 @@ projected call is parked as-is so the operator can see and resolve it. Passing
 it back through `emit_effect` would re-decide it against the coarser
 `ApprovalGate` taxonomy and quietly drop it (issue #172).
 
-`CycleRequest` carries `{cycle_id, company_id, events, compressed_history,
-roster, context_index}`; `CycleResult` carries channel responses, new
+`CycleRequest` carries `{cycle_id, company_id, events, event_seqs}`. It also
+carried `compressed_history`, `roster` and `context_index` until issue #1175:
+no `Brain` read any of the three, and populating the first two cost a
+`recent_traces` read plus an unbounded `ContextStore::list` scan on every
+cycle. A cycle therefore carries **no working memory** — see
+[company-brain/memory.md](../company-brain/memory.md) for what does the
+compounding instead. `CycleResult` carries channel responses, new
 compressed traces, ledger deltas, and `token_usage` — tokens **and** cost, which
 `CycleRunner` meters onto the [`UsageMeter`](ports-console.md#usagemeter) +
 ledger for every path that is not

@@ -49,9 +49,6 @@ use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
-/// How many recent traces to load into a cycle's compressed history.
-const HISTORY_LIMIT: usize = 32;
-
 /// The `Effect::kind` for an outbound email send. Shared between where the
 /// effect is built (`CycleHostImpl::send_email`, and the workflow delivery path
 /// in [`crate::workflows::delivery`]) and where it is executed
@@ -415,23 +412,15 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        // 3. Load — history, context index, roster.
-        let compressed_history = self
-            .rt
-            .memory
-            .recent_traces(&company, HISTORY_LIMIT)
-            .await?;
-        let context_index = self.rt.context.list(&company, "").await?;
+        // 3. Load — the company record, and nothing else.
+        //
+        // Issue #1175: this step used to also read 32 recent traces and the
+        // *entire* context index (`list(&company, "")` — no prefix, no limit, so
+        // a full scan that grows with every turn the company has ever run) into
+        // `CycleRequest`. No brain read either one. Both loads are gone; see the
+        // note on [`CycleRequest`] for why the fields went with them. Traces are
+        // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
-        let roster = match &record {
-            Some(record) => record
-                .manifest
-                .agents
-                .iter()
-                .map(|agent| agent.id.clone())
-                .collect(),
-            None => Vec::new(),
-        };
 
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
@@ -464,9 +453,6 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
-            compressed_history,
-            roster,
-            context_index,
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
@@ -2920,7 +2906,7 @@ mod test {
         assert!(!task_names_a_card(&[], "019ff728-abcd"));
     }
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::company::CompanyManifest;
     use crate::company::runtime::CompanyMail;
@@ -2928,13 +2914,16 @@ mod test {
     use crate::ports::ChannelAdapter;
     use crate::ports::brain::Brain;
     use crate::ports::types::{
-        ActorKind, CompressedTrace, CycleResult, EffectGroup, EventSeq, ReplyTo, TokenUsage,
+        ActorKind, ChunkAddr, ChunkHit, ChunkMeta, CompressedTrace, ContextChunk, CycleResult,
+        EffectGroup, EventSeq, EvictionPolicy, ReplyTo, TaskResult, TokenUsage,
     };
+    use crate::ports::{ContextStore, MemoryStore};
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::channel::OperatorChannel;
     use crate::server::ops::mailer::RecordingMailSender;
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::paths::Bundle;
+    use crate::store::{FsContextStore, FsMemoryStore};
 
     fn tmp_home() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -3504,6 +3493,142 @@ mod test {
         }])
         .await
         .expect("an unknown run id is a bookkeeping miss, not a cycle failure");
+    }
+
+    /// A [`MemoryStore`] that counts the calls a cycle makes, delegating the
+    /// work to a real fs store so the runtime behaves normally around it.
+    struct CountingMemory {
+        inner: FsMemoryStore,
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+    }
+
+    impl CountingMemory {
+        fn new(inner: FsMemoryStore) -> Self {
+            Self {
+                inner,
+                reads: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for CountingMemory {
+        async fn save_trace(&self, id: &CompanyId, trace: CompressedTrace) -> Result<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.save_trace(id, trace).await
+        }
+
+        async fn recent_traces(
+            &self,
+            id: &CompanyId,
+            limit: usize,
+        ) -> Result<Vec<CompressedTrace>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.recent_traces(id, limit).await
+        }
+
+        async fn save_task_result(&self, id: &CompanyId, result: TaskResult) -> Result<()> {
+            self.inner.save_task_result(id, result).await
+        }
+
+        async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
+            self.inner.evict(id, policy).await
+        }
+    }
+
+    /// The [`ContextStore`] half of the same instrument.
+    struct CountingContext {
+        inner: FsContextStore,
+        lists: AtomicUsize,
+    }
+
+    impl CountingContext {
+        fn new(inner: FsContextStore) -> Self {
+            Self {
+                inner,
+                lists: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContextStore for CountingContext {
+        async fn put(&self, id: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
+            self.inner.put(id, chunk).await
+        }
+
+        async fn list(&self, id: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            self.inner.list(id, prefix).await
+        }
+
+        async fn peek(
+            &self,
+            id: &CompanyId,
+            addr: &ChunkAddr,
+            range: Option<std::ops::Range<usize>>,
+        ) -> Result<String> {
+            self.inner.peek(id, addr, range).await
+        }
+
+        async fn search(&self, id: &CompanyId, query: &str, limit: usize) -> Result<Vec<ChunkHit>> {
+            self.inner.search(id, query, limit).await
+        }
+    }
+
+    /// Issue #1175: a cycle used to load 32 recent traces *and the whole context
+    /// index* (`list(company, "")` — no prefix, no limit) into `CycleRequest`,
+    /// where no brain read either. Both reads are gone, and the context one was
+    /// the expensive half: it grew with every turn the company had ever run.
+    ///
+    /// The trace *write* deliberately stayed — traces travel with the export
+    /// bundle — so this asserts the save as well. Without that half, a later
+    /// "nothing reads traces, delete the write" would pass silently.
+    #[tokio::test]
+    async fn a_cycle_reads_neither_recent_traces_nor_the_context_index() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let memory = Arc::new(CountingMemory::new(FsMemoryStore::new(home.clone())));
+        let context = Arc::new(CountingContext::new(FsContextStore::new(home.clone())));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_memory(memory.clone())
+            .with_context(context.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Boot is not what this test is about; only what one cycle costs.
+        memory.reads.store(0, Ordering::SeqCst);
+        memory.writes.store(0, Ordering::SeqCst);
+        context.lists.store(0, Ordering::SeqCst);
+
+        rt.run_cycle(vec![CompanyEvent::OperatorMessage {
+            parent: None,
+            text: "hi".into(),
+            by: None,
+            chat: None,
+            deliverable: None,
+        }])
+        .await
+        .unwrap();
+
+        assert_eq!(
+            memory.reads.load(Ordering::SeqCst),
+            0,
+            "a cycle must not read traces back: no brain consumes them"
+        );
+        assert_eq!(
+            context.lists.load(Ordering::SeqCst),
+            0,
+            "a cycle must not scan the context index: no brain consumes it"
+        );
+        assert_eq!(
+            memory.writes.load(Ordering::SeqCst),
+            1,
+            "the trace write is not dead code — it feeds the export bundle"
+        );
     }
 
     #[tokio::test]

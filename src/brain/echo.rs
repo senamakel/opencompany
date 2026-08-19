@@ -173,9 +173,6 @@ mod test {
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
-            compressed_history: Vec::new(),
-            roster: Vec::new(),
-            context_index: Vec::new(),
         }
     }
 

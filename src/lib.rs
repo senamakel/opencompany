@@ -54,6 +54,11 @@ pub mod runner;
 pub mod runtime;
 pub mod server;
 pub mod store;
+/// The process-wide environment lock every env-mutating unit test in this crate
+/// serialises on. Test-only: it compiles into the lib test binary and nowhere
+/// else.
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tiny;
 /// Transient per-turn progress bus — the live tool-call timeline that rides the
 /// company SSE feed while a turn runs. Separate from the durable event log; the

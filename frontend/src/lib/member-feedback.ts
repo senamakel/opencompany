@@ -44,6 +44,41 @@ export type AddMemberOutcome =
   /** Nothing was created. `message` is the host's refusal where there is one. */
   | { kind: "failed"; message: string };
 
+/**
+ * One step of the add that did not land.
+ *
+ * A single add can miss in more than one way at once — the inbox refused *and*
+ * the refetch that was meant to substantiate the whole thing failed — and
+ * picking one to report would drop a failure the operator has to act on. So the
+ * views collect what missed and `addOutcome` builds the sentence.
+ */
+export interface MissedStep {
+  /** Completes "Added Ada, but …" — no leading capital, no trailing stop. */
+  what: string;
+  /** What the operator can do about it, as a whole sentence. */
+  fix?: string;
+}
+
+/**
+ * A clean add, or the honest version of one.
+ *
+ * Empty `missed` is the only thing that earns a plain success. In particular a
+ * refetch that failed belongs in here rather than being ignored: the console
+ * cannot see the record it is about to congratulate itself on, and on the Team
+ * roster the failed read actively *replaces* the roster with the starter team,
+ * so "Added Ada." would sit above a list Ada is not in.
+ */
+export function addOutcome(name: string, missed: MissedStep[]): AddMemberOutcome {
+  if (missed.length === 0) return { kind: "added", name };
+  const fixes = missed.map((m) => m.fix).filter(Boolean);
+  return {
+    kind: "partial",
+    name,
+    missed: `${missed.map((m) => m.what).join(", and ")}.`,
+    fix: fixes.length ? fixes.join(" ") : undefined,
+  };
+}
+
 /** A toast, decided but not yet raised — the testable half of the answer. */
 export interface AddMemberMessage {
   level: "success" | "warning" | "error";

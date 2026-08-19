@@ -221,6 +221,14 @@ pub struct MemoryOverlay {
     /// three ports, so it fills this in rather than splitting one company's
     /// memory across two engines.
     pub facts: Option<Arc<dyn FactStore>>,
+    /// The inbound-content partition: writes land taint-stamped
+    /// `ExternalSync`, so third-party content can never launder into
+    /// internal-trust memory. Carried on the overlay so the runtime can route
+    /// channel/web ingestion through it the day such a path exists — no
+    /// production writer yet, and that absence is tracked in #1113.
+    pub inbound_context: Option<Arc<dyn ContextStore>>,
+    /// The scratch firewall: working-out that durable recall can never reach.
+    pub scratch: Option<Arc<dyn ContextStore>>,
     /// What is bound, for status output.
     pub descriptor: MemoryDescriptor,
 }
@@ -353,41 +361,25 @@ pub struct StorageSettings {
     /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
     /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
     ///
-    /// A manifest `[memory].provider` outranks this, on the same principle as
-    /// `[inference].provider` — the manifest travels with the company, the
-    /// environment describes the host.
+    /// Env is the only channel: memory selection is instance-level (one engine
+    /// per boot, like `OPENCOMPANY_STORAGE`), while manifests are per-company —
+    /// a company-scoped knob for an instance-wide choice would be incoherent.
+    /// This deliberately differs from `[inference].provider`, which *is*
+    /// per-company and rightly lives in the manifest.
     pub memory_driver: Option<String>,
-    /// Operator's explicit acceptance that the hosted memory adapters are not
-    /// yet conformance-proven (`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
-    ///
-    /// `OPENCOMPANY_MEMORY=remote` routes a company's entire memory at a
-    /// third-party HTTP service through an adapter that upstream covers with a
-    /// handful of happy-path tests — no error mapping, no pagination, no taint
-    /// preservation, no `Unsupported` behaviour. tinymemory#18 §E1 names a
-    /// driver conformance suite as the gate for turning this on at all, and
-    /// until that suite runs against those adapters, "it compiled" is the
-    /// strongest thing anyone can say about them.
-    ///
-    /// So the mode exists, refuses by default, and lifts on an explicit
-    /// assertion — the same shape as
-    /// [`allow_ephemeral_memory`](Self::allow_ephemeral_memory), and for the
-    /// same reason: the failure is silent and lands on a tenant's memory.
-    /// `false` (the [`Default`]) keeps the guard.
-    ///
-    /// This is a gate on *confidence*, not on configuration, so it is expected
-    /// to be deleted rather than lived with. Once the conformance suite covers
-    /// the adapters, this field and its refusal go.
-    pub allow_unproven_remote: bool,
-    /// The hosted engine's endpoint (`OPENCOMPANY_MEMORY_URL`).
     pub memory_url: Option<String>,
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
     ///
     /// A raw credential, so it is kept out of [`Debug`] — see the impl below.
-    /// The manifest form, `[memory].api_key_secret`, names a
-    /// [`SecretStore`](crate::ports::SecretStore) key instead and is preferred:
-    /// it is the convention every other integration follows, and it keeps the
-    /// credential out of the process environment. This env var exists because
-    /// the hosted manager injects environment, not manifests.
+    ///
+    /// Env is the only supported channel. A
+    /// [`SecretStore`](crate::ports::SecretStore) key — the convention every
+    /// other integration follows, and the one that would keep this out of the
+    /// process environment — is deliberately *not* accepted here: the store is
+    /// per-company and opened from the storage layer this setting is used to
+    /// build, so reading the memory credential out of it would be circular.
+    /// The hosted manager injects environment rather than manifests, which is
+    /// what makes env sufficient.
     pub memory_api_key: Option<String>,
 }
 
@@ -406,7 +398,6 @@ impl std::fmt::Debug for StorageSettings {
             .field("memory_backend", &self.memory_backend)
             .field("data_dir", &self.data_dir)
             .field("allow_ephemeral_memory", &self.allow_ephemeral_memory)
-            .field("allow_unproven_remote", &self.allow_unproven_remote)
             .field("memory_driver", &self.memory_driver)
             .field("memory_url", &self.memory_url.as_ref().map(|_| "<set>"))
             .field(
@@ -450,8 +441,7 @@ impl StorageSettings {
     /// Reads the CLI-surface storage env vars (`OPENCOMPANY_STORAGE`,
     /// `OPENCOMPANY_MONGODB_URI`, `OPENCOMPANY_MONGODB_DB`,
     /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`,
-    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`,
-    /// `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
+    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`).
     pub fn from_env() -> Result<Self> {
         let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
         let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
@@ -464,7 +454,6 @@ impl StorageSettings {
             memory_backend,
             data_dir: Some(crate::app::config::data_dir_from_env()),
             allow_ephemeral_memory: env_flag("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
-            allow_unproven_remote: env_flag("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
             memory_driver: non_empty("OPENCOMPANY_MEMORY_DRIVER"),
             memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
@@ -494,13 +483,33 @@ pub async fn open_storage(
 pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
+        // `embedded` with a driver named is the contract-bound in-pod store
+        // (`OPENCOMPANY_MEMORY_DRIVER=namespace`); without one it is the
+        // incumbent engine overlay. Routing on a non-blank value is
+        // deliberate on both halves: an unknown driver id must reach
+        // `open_driver`'s refusal, never fall back silently to the engine the
+        // operator did not name — and a whitespace-only value must mean "not
+        // set" exactly as it does for the remote credential, because the env
+        // reader above does not trim and `open_driver` does, so routing on
+        // bare presence would send `"  "` down a path that binds nothing and
+        // answers `Ok(None)`: no engine, no refusal, memory quietly on the
+        // base store.
+        MemoryBackend::Tinycortex
+            if settings
+                .memory_driver
+                .as_deref()
+                .is_some_and(|driver| !driver.trim().is_empty()) =>
+        {
+            open_provider(settings)
+        }
         MemoryBackend::Tinycortex => open_tinycortex(settings),
         MemoryBackend::Remote | MemoryBackend::Null => open_provider(settings),
     }
 }
 
 /// Opens a [`MemoryProvider`](tinymemory_api::provider::MemoryProvider)-backed
-/// overlay for the `remote` and `null` modes.
+/// overlay: the `remote` and `null` modes, and `embedded` when
+/// `OPENCOMPANY_MEMORY_DRIVER=namespace` selects the in-pod contract store.
 ///
 /// Unlike [`open_tinycortex`], this one also carries a `FactStore`: the provider
 /// contract covers all three memory ports, so there is no reason to leave the
@@ -510,32 +519,62 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     use crate::store::memory::{BoundMemory, MemoryDriverConfig, MemoryMode, open_driver};
 
-    if settings.memory_backend == MemoryBackend::Remote && !settings.allow_unproven_remote {
-        return Err(OpenCompanyError::Config(
-            "OPENCOMPANY_MEMORY=remote routes this company's entire memory at a hosted service \
-             through an adapter that is not yet covered by a driver conformance suite \
-             (tinymemory#18 §E1): its error mapping, pagination, and provenance preservation are \
-             untested, and a memory engine that loses provenance or silently drops a page fails \
-             in ways nothing surfaces until the memory is needed. If you accept that for this \
-             deployment, set OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1 to assert it. Otherwise \
-             use OPENCOMPANY_MEMORY=embedded for the durable in-pod engine, or the default \
-             OPENCOMPANY_MEMORY=store."
-                .to_string(),
-        ));
-    }
+    // The unproven-remote acceptance flag retired here: its premise — "no
+    // driver conformance suite (tinymemory#18 §E1)" — stopped being true when
+    // the vendored tinymemory gained one (a shared suite run against all four
+    // drivers, plus failure-path tests on the remote adapters). The bind-time
+    // capability audit below is the live safeguard.
     let mode = match settings.memory_backend {
         MemoryBackend::Remote => MemoryMode::Remote,
         MemoryBackend::Null => MemoryMode::Null,
-        // Unreachable: the caller matched these two arms.
-        MemoryBackend::Store | MemoryBackend::Tinycortex => return Ok(None),
+        MemoryBackend::Tinycortex => MemoryMode::Embedded,
+        // Unreachable: the caller never routes `store` here.
+        MemoryBackend::Store => return Ok(None),
     };
+    if mode == MemoryMode::Embedded
+        && settings.kind == StorageKind::Mongodb
+        && !settings.allow_ephemeral_memory
+    {
+        // The same refuse-to-open durability contract `open_tinycortex`
+        // enforces, for the same reason: this driver persists to the local
+        // data dir, which the mongodb hosting model treats as ephemeral
+        // scratch, so in-pod memory would be silently lost on restart.
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY_DRIVER=namespace needs a persistent volume at the data dir, but \
+             OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch by default, so in-pod \
+             memory would be silently lost on restart. If you have mounted a genuinely \
+             persistent volume at OPENCOMPANY_DATA_DIR, set OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1 \
+             to assert its durability and open the store anyway. Otherwise use \
+             OPENCOMPANY_STORAGE=fs or sqlite (durable /data), or a hosted engine with \
+             OPENCOMPANY_MEMORY=remote."
+                .into(),
+        ));
+    }
     let config = MemoryDriverConfig {
         mode,
         driver_id: settings.memory_driver.clone(),
         url: settings.memory_url.clone(),
         api_key: settings.memory_api_key.clone(),
+        data_dir: settings.data_dir.clone(),
     };
     let Some((provider, class)) = open_driver(&config)? else {
+        // Only `embedded` can answer "no driver to bind", and the caller only
+        // routes `embedded` here when a driver IS named. Reaching this arm
+        // therefore means the routing predicate and `open_driver`'s own
+        // driver-id normalisation have drifted apart — and returning `Ok(None)`
+        // would drop the memory overlay on the floor with no refusal and no
+        // engine, which is the silent shape everything here refuses. Fail the
+        // boot instead, naming the state.
+        if settings.memory_backend == MemoryBackend::Tinycortex {
+            return Err(OpenCompanyError::Config(
+                "OPENCOMPANY_MEMORY=embedded routed to the provider seam with \
+                 OPENCOMPANY_MEMORY_DRIVER set, but no driver bound. This is a \
+                 host bug, not a configuration mistake; unset \
+                 OPENCOMPANY_MEMORY_DRIVER to run the engine overlay while it \
+                 is fixed."
+                    .into(),
+            ));
+        }
         return Ok(None);
     };
     let bound = BoundMemory::bind(provider, class)?;
@@ -563,6 +602,8 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         memory: bound.memory(),
         context: bound.context(),
         facts: Some(bound.facts()),
+        inbound_context: Some(bound.inbound_context()),
+        scratch: Some(bound.scratch()),
         descriptor: MemoryDescriptor {
             backend: settings.memory_backend,
             driver_id: bound.driver_id().to_string(),
@@ -579,6 +620,16 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
 /// served, so they refuse rather than silently resolving to something else.
 #[cfg(not(feature = "tinymemory"))]
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    // The embedded contract driver needs `tinymemory-embedded` (a superset of
+    // `tinymemory`), so name the feature that would actually fix the build.
+    if settings.memory_backend == MemoryBackend::Tinycortex {
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=embedded with OPENCOMPANY_MEMORY_DRIVER set requires a build \
+             with the `tinymemory-embedded` feature; unset OPENCOMPANY_MEMORY_DRIVER to use \
+             the engine overlay"
+                .into(),
+        ));
+    }
     Err(OpenCompanyError::Config(format!(
         "OPENCOMPANY_MEMORY={} requires a build with the `tinymemory` feature",
         settings.memory_backend.as_str()
@@ -667,8 +718,12 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
         memory,
         context,
         // The embedded engine implements memory + context only; facts stay on
-        // the base backend, as they always have.
+        // the base backend, as they always have. The provider-seam partitions
+        // (inbound/scratch) do not exist on this path — it predates the
+        // decorator and is tracked for retirement in #1113 item 5.
         facts: None,
+        inbound_context: None,
+        scratch: None,
         descriptor: MemoryDescriptor {
             backend: MemoryBackend::Tinycortex,
             // The literal rather than `tinymemory::registry::TINYCORTEX_DRIVER_ID`:
@@ -813,6 +868,8 @@ impl OwnershipStore for crate::store::MongoStore {
 mod test {
     use super::*;
 
+    use crate::test_support::EnvVarGuard;
+
     #[test]
     fn parses_storage_kinds() {
         assert_eq!("fs".parse::<StorageKind>().unwrap(), StorageKind::Fs);
@@ -952,7 +1009,6 @@ mod test {
             memory_driver: Some("supermemory".into()),
             // Past the confidence gate, so this asserts the *configuration*
             // refusal rather than tripping over the one before it.
-            allow_unproven_remote: true,
             ..StorageSettings::default()
         };
         let error = open_memory_overlay(&settings)
@@ -963,42 +1019,54 @@ mod test {
 
     #[cfg(feature = "tinymemory")]
     #[test]
-    fn remote_refuses_until_the_operator_accepts_an_unproven_adapter() {
-        // The hosted adapters have no conformance coverage yet
-        // (tinymemory#18 §E1). Routing a tenant's whole memory at one is a
-        // decision an operator makes deliberately, not one they arrive at by
-        // setting a single variable.
+    fn remote_with_full_config_proceeds_to_the_driver_without_an_acceptance_flag() {
+        // The unproven-remote acceptance flag is retired: the vendored
+        // tinymemory now ships a driver conformance suite that runs against
+        // all the hosted adapters, so the flag's premise is gone. A fully
+        // configured remote proceeds to driver construction — the error here
+        // is the driver failing to reach the (nonexistent) endpoint or an
+        // admission refusal, never a demand for a deleted knob.
         let settings = StorageSettings {
             memory_backend: MemoryBackend::Remote,
             memory_driver: Some("supermemory".into()),
-            memory_url: Some("https://memory.example".into()),
+            memory_url: Some("https://memory.invalid".into()),
             memory_api_key: Some("k".into()),
             ..StorageSettings::default()
         };
-        let error = open_memory_overlay(&settings)
-            .expect_err("a fully configured remote engine still needs the assertion")
-            .to_string();
-        assert!(
-            error.contains("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
-            "the refusal must name the knob: {error}"
-        );
-        // And it must name a way forward that is not "give up".
-        assert!(error.contains("OPENCOMPANY_MEMORY=embedded"), "{error}");
+        match open_memory_overlay(&settings) {
+            // `Ok(None)` is the trap this arm exists to close: it is how a
+            // silently skipped remote overlay would look, and an
+            // error-message-only assertion would pass straight through it.
+            Ok(overlay) => assert!(
+                overlay.is_some(),
+                "a fully configured remote must bind an overlay, not skip one"
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    !error.contains("ALLOW_UNPROVEN_REMOTE"),
+                    "the retired knob must not be demanded: {error}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "tinymemory")]
     #[test]
-    fn remote_opens_once_the_operator_has_accepted_it() {
+    fn remote_binds_and_reports_its_driver() {
+        // The success half of the pair above: a complete configuration binds,
+        // and the descriptor it reports back names the driver that was asked
+        // for rather than a fallback. No acceptance step is involved — that
+        // knob is retired.
         let settings = StorageSettings {
             memory_backend: MemoryBackend::Remote,
             memory_driver: Some("supermemory".into()),
             memory_url: Some("https://memory.example".into()),
             memory_api_key: Some("k".into()),
-            allow_unproven_remote: true,
             ..StorageSettings::default()
         };
         let overlay = open_memory_overlay(&settings)
-            .expect("an accepted, fully configured remote engine binds")
+            .expect("a fully configured remote engine binds")
             .expect("remote yields an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
         assert_eq!(overlay.descriptor.driver_id, "supermemory");
@@ -1022,6 +1090,102 @@ mod test {
 
     #[cfg(feature = "tinymemory")]
     #[test]
+    fn a_blank_embedded_driver_id_means_not_set_and_is_never_silent() {
+        // The env reader does not trim, `open_driver` does. If the routing
+        // predicate disagreed with that normalisation, `"  "` would route to
+        // the provider seam, bind nothing, and come back `Ok(None)` — memory
+        // quietly on the base store with no refusal and no engine. So a blank
+        // value must take the engine path (exactly as unset does), and
+        // whatever that path answers under this build's features, it must
+        // never be the silent no-overlay shape.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("  ".into()),
+            ..StorageSettings::default()
+        };
+        match open_memory_overlay(&settings) {
+            Ok(overlay) => assert!(
+                overlay.is_some(),
+                "a blank driver id silently dropped the memory overlay"
+            ),
+            // The engine path refusing (e.g. the `tinycortex` feature is off
+            // in this build) is a loud, correct answer.
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    !error.trim().is_empty(),
+                    "an empty refusal explains nothing"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn an_embedded_driver_id_routes_to_the_provider_seam_not_the_engine() {
+        // `embedded` with a driver named must reach `open_driver` — where an
+        // unknown id refuses by name — and must never fall back silently to
+        // the engine overlay the operator did not ask for.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("supermemory".into()),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("an unknown embedded driver id must refuse, not fall back")
+            .to_string();
+        assert!(error.contains("namespace"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_refuses_an_ephemeral_data_dir() {
+        // The same refuse-to-open durability contract `open_tinycortex`
+        // enforces: this driver persists to the local data dir, which the
+        // mongodb hosting model treats as ephemeral scratch.
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("namespace".into()),
+            data_dir: Some(std::path::PathBuf::from("/data")),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("an in-pod store on ephemeral /data must refuse")
+            .to_string();
+        assert!(
+            error.contains("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_binds_and_reports_the_embedded_backend() {
+        // The wired end state of #1113: `OPENCOMPANY_MEMORY=embedded` +
+        // `OPENCOMPANY_MEMORY_DRIVER=namespace` binds the contract's own
+        // durable store through the same seam as the hosted engines — full
+        // three-port overlay, taint partitions included — while the
+        // descriptor keeps reporting the operator's `embedded` vocabulary.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("namespace".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .expect("a configured namespace driver binds")
+            .expect("the namespace driver yields an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Tinycortex);
+        assert_eq!(overlay.descriptor.driver_id, "namespace");
+        assert!(overlay.facts.is_some(), "a provider serves facts too");
+        assert!(overlay.inbound_context.is_some());
+        assert!(overlay.scratch.is_some());
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
     fn null_opens_and_reports_itself() {
         let settings = StorageSettings {
             memory_backend: MemoryBackend::Null,
@@ -1032,7 +1196,19 @@ mod test {
             .expect("null binds an overlay");
         assert_eq!(overlay.descriptor.backend, MemoryBackend::Null);
         assert_eq!(overlay.descriptor.driver_id, "null");
+        // A bound provider serves all three seam partitions, not just facts.
+        // Asserting each one separately is what catches a partition that is
+        // wired to `None` at the construction site while the others are not —
+        // which reads downstream as "this engine has no scratch", not as a bug.
         assert!(overlay.facts.is_some(), "a provider serves facts too");
+        assert!(
+            overlay.inbound_context.is_some(),
+            "a provider serves the inbound-context partition"
+        );
+        assert!(
+            overlay.scratch.is_some(),
+            "a provider serves the scratch partition"
+        );
     }
 
     #[cfg(not(feature = "tinymemory"))]
@@ -1067,23 +1243,21 @@ mod test {
         // The four knobs `remote` needs. Without this, a rename in `from_env`
         // would surface as "the engine refuses and names a variable you did
         // set", which reads as a broken deployment rather than a broken parse.
-        const KEYS: [&str; 4] = [
-            "OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE",
+        const KEYS: [&str; 3] = [
             "OPENCOMPANY_MEMORY_DRIVER",
             "OPENCOMPANY_MEMORY_URL",
             "OPENCOMPANY_MEMORY_API_KEY",
         ];
-        // SAFETY: single-threaded test; restores prior state.
-        let prev: Vec<_> = KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        // Takes the crate-wide env lock for the whole body and restores every
+        // key on drop — including on panic, which the hand-rolled restore this
+        // replaced would have skipped, leaving a driver name set for whatever
+        // `from_env` test libtest scheduled next.
+        let env = EnvVarGuard::capture(&KEYS);
 
-        unsafe {
-            std::env::set_var(KEYS[0], "1");
-            std::env::set_var(KEYS[1], "supermemory");
-            std::env::set_var(KEYS[2], "https://memory.example");
-            std::env::set_var(KEYS[3], "sk-test");
-        }
+        env.set(KEYS[0], "supermemory");
+        env.set(KEYS[1], "https://memory.example");
+        env.set(KEYS[2], "sk-test");
         let settings = StorageSettings::from_env().unwrap();
-        assert!(settings.allow_unproven_remote);
         assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
         assert_eq!(
             settings.memory_url.as_deref(),
@@ -1093,56 +1267,36 @@ mod test {
 
         // Empty is absent, not an empty credential: `require` would otherwise
         // accept a blank key and defer the failure to the first call.
-        unsafe {
-            std::env::set_var(KEYS[1], "");
-            std::env::set_var(KEYS[3], "");
-        }
+        env.set(KEYS[0], "");
+        env.set(KEYS[2], "");
         let blank = StorageSettings::from_env().unwrap();
         assert_eq!(blank.memory_driver, None);
         assert_eq!(blank.memory_api_key, None);
 
-        unsafe {
-            for key in KEYS {
-                std::env::remove_var(key);
-            }
+        for key in KEYS {
+            env.remove(key);
         }
         let unset = StorageSettings::from_env().unwrap();
-        assert!(!unset.allow_unproven_remote);
         assert_eq!(unset.memory_driver, None);
         assert_eq!(unset.memory_url, None);
         assert_eq!(unset.memory_api_key, None);
-
-        unsafe {
-            for (key, value) in prev {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
     }
 
     #[test]
     fn from_env_reads_memory_backend() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_MEMORY").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_MEMORY"]);
 
-        unsafe { std::env::set_var("OPENCOMPANY_MEMORY", "tinycortex") };
+        env.set("OPENCOMPANY_MEMORY", "tinycortex");
         assert_eq!(
             StorageSettings::from_env().unwrap().memory_backend,
             MemoryBackend::Tinycortex
         );
 
-        unsafe { std::env::remove_var("OPENCOMPANY_MEMORY") };
+        env.remove("OPENCOMPANY_MEMORY");
         assert_eq!(
             StorageSettings::from_env().unwrap().memory_backend,
             MemoryBackend::Store
         );
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_MEMORY", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_MEMORY") },
-        }
     }
 
     #[cfg(feature = "tinycortex")]
@@ -1185,6 +1339,23 @@ mod test {
             .await
             .unwrap();
         assert!(leaked.is_empty(), "cross-company recall must not bleed");
+
+        // The counterpart to the provider assertions above: the in-pod engine
+        // predates the seam and implements memory + context only, so all three
+        // provider partitions stay unset. Pinning that keeps the two overlay
+        // constructors from drifting into disagreeing about what `None` means.
+        assert!(
+            overlay.facts.is_none(),
+            "the embedded engine leaves facts on the base backend"
+        );
+        assert!(
+            overlay.inbound_context.is_none(),
+            "the embedded engine has no inbound-context partition"
+        );
+        assert!(
+            overlay.scratch.is_none(),
+            "the embedded engine has no scratch partition"
+        );
     }
 
     /// Refuse-to-open contract: `OPENCOMPANY_STORAGE=mongodb` makes `/data`
@@ -1265,60 +1436,48 @@ mod test {
 
     #[test]
     fn from_env_reads_tenant_id() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_TENANT_ID").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_TENANT_ID"]);
 
-        unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", "acme") };
+        env.set("OPENCOMPANY_TENANT_ID", "acme");
         assert_eq!(
             StorageSettings::from_env().unwrap().tenant_id.as_deref(),
             Some("acme")
         );
 
         // An empty value is filtered out, same as the mongodb vars.
-        unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", "") };
+        env.set("OPENCOMPANY_TENANT_ID", "");
         assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
 
         // Unset leaves it `None` (the id-namespacing no-op).
-        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
+        env.remove("OPENCOMPANY_TENANT_ID");
         assert_eq!(StorageSettings::from_env().unwrap().tenant_id, None);
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
-        }
     }
 
     #[test]
     fn from_env_reads_data_dir() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_DATA_DIR").ok();
+        let env = EnvVarGuard::capture(&["OPENCOMPANY_DATA_DIR"]);
 
         // An explicit data dir is threaded straight through into settings.
-        unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", "/srv/oc-data") };
+        env.set("OPENCOMPANY_DATA_DIR", "/srv/oc-data");
         assert_eq!(
             StorageSettings::from_env().unwrap().data_dir,
             Some(PathBuf::from("/srv/oc-data")),
             "OPENCOMPANY_DATA_DIR must be read into StorageSettings::data_dir"
         );
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_DATA_DIR") },
-        }
     }
 
     #[test]
     fn from_env_reads_allow_ephemeral_memory() {
-        // SAFETY: single-threaded test; restores prior state.
-        let prev = std::env::var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL").ok();
+        const KEY: &str = "OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL";
+        let env = EnvVarGuard::capture(&[KEY]);
 
         // Unset → the safe default: refuse (flag false).
-        unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") };
+        env.remove(KEY);
         assert!(!StorageSettings::from_env().unwrap().allow_ephemeral_memory);
 
         // Truthy values set the durability assertion.
         for truthy in ["1", "true", "YES", "On"] {
-            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", truthy) };
+            env.set(KEY, truthy);
             assert!(
                 StorageSettings::from_env().unwrap().allow_ephemeral_memory,
                 "{truthy:?} must read as durability asserted"
@@ -1327,16 +1486,11 @@ mod test {
 
         // Any non-truthy value stays false (fails safe toward refusal).
         for falsy in ["0", "false", "no", ""] {
-            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", falsy) };
+            env.set(KEY, falsy);
             assert!(
                 !StorageSettings::from_env().unwrap().allow_ephemeral_memory,
                 "{falsy:?} must read as not asserted"
             );
-        }
-
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", v) },
-            None => unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") },
         }
     }
 

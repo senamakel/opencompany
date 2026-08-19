@@ -18,9 +18,8 @@ vi.mock("sonner", () => {
   return { toast };
 });
 
-const { addMemberFailure, addMemberMessage, reportAddMember } = await import(
-  "@/lib/member-feedback"
-);
+const { addMemberFailure, addMemberMessage, addOutcome, reportAddMember } =
+  await import("@/lib/member-feedback");
 
 /**
  * Issue #1099: adding a teammate said nothing at all, and the three surfaces
@@ -78,6 +77,62 @@ describe("addMemberMessage", () => {
       level: "error",
       title: "Name already taken.",
     });
+  });
+});
+
+/**
+ * A refetch that failed is a missed step, not a detail (review of #1099).
+ *
+ * Both `boot()`s swallow their own errors — `TeamView`'s goes further and
+ * empties the roster — so before this the console could POST a teammate, fail
+ * to read them back, and toast "Added Ada." over a list Ada was not in. The
+ * refetch is what the toast's timing was justified by, so it has to be able to
+ * withhold the confirmation it was supposed to substantiate.
+ */
+describe("addOutcome", () => {
+  it("is a clean add only when nothing missed", () => {
+    expect(addOutcome("Ada", [])).toEqual({ kind: "added", name: "Ada" });
+  });
+
+  it("withholds the confirmation when the read-back failed", () => {
+    const outcome = addOutcome("Ada", [
+      { what: "the roster couldn't be read back", fix: "Reload to see them." },
+    ]);
+    expect(outcome.kind).toBe("partial");
+    expect(addMemberMessage(outcome)).toEqual({
+      level: "warning",
+      title: "Added Ada, but the roster couldn't be read back.",
+      description: "Reload to see them.",
+    });
+  });
+
+  it("reports every miss, rather than picking one", () => {
+    // The inbox refusing and the read-back failing are different follow-ups
+    // and the operator owes both; dropping either is how one goes unnoticed.
+    const msg = addMemberMessage(
+      addOutcome("Ada", [
+        { what: "their inbox couldn't be switched on", fix: "Turn it on from their actions menu." },
+        { what: "the roster couldn't be read back", fix: "Reload to see them." },
+      ]),
+    );
+    expect(msg.title).toBe(
+      "Added Ada, but their inbox couldn't be switched on, and the roster couldn't be read back.",
+    );
+    expect(msg.description).toBe(
+      "Turn it on from their actions menu. Reload to see them.",
+    );
+  });
+
+  it("carries no description when no step offered a follow-up", () => {
+    expect(addOutcome("Ada", [{ what: "something slipped" }]).kind).toBe("partial");
+    expect(addMemberMessage(addOutcome("Ada", [{ what: "something slipped" }])).description).toBeUndefined();
+  });
+
+  it("never reaches toast.success for a failed read-back", () => {
+    for (const fn of Object.values(toasts)) fn.mockClear();
+    reportAddMember(addOutcome("Ada", [{ what: "the roster couldn't be read back" }]));
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(toasts.warning).toHaveBeenCalledTimes(1);
   });
 });
 

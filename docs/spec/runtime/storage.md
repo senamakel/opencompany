@@ -99,7 +99,10 @@ Moved to [`memory-engine.md`](memory-engine.md) — this file was over the repos
 `tinycortex`), `remote`, or `null`. A hosted engine additionally needs
 `OPENCOMPANY_MEMORY_DRIVER`, `OPENCOMPANY_MEMORY_URL` and
 `OPENCOMPANY_MEMORY_API_KEY`; each refuses at boot when missing, naming the
-knob, and never falls back to the embedded engine. The credential and the
+knob, and never falls back to the embedded engine. `embedded` with
+`OPENCOMPANY_MEMORY_DRIVER=namespace` binds the contract's own durable in-pod
+store through the provider seam instead of the engine overlay
+(`tinymemory-embedded` feature). The credential and the
 endpoint never appear in logs, `/healthz`, `/spec`, status output, or an export
 — `/spec` reports the engine's `driver_id` and negotiated capabilities only.
 

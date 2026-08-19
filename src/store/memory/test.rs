@@ -165,7 +165,25 @@ impl Memory for FakeEngine {
     }
 
     async fn namespace_summaries(&self) -> anyhow::Result<Vec<NamespaceSummary>> {
-        Ok(Vec::new())
+        // Real summaries, derived from the rows: the mandatory composition's
+        // `export_page` WALKS these namespaces — a fake that reports none
+        // exports nothing, and every export/import test silently asserts on
+        // an empty page.
+        let rows = self.rows.lock().unwrap();
+        let mut namespaces: Vec<String> = rows.keys().map(|(ns, _)| ns.clone()).collect();
+        namespaces.sort();
+        namespaces.dedup();
+        Ok(namespaces
+            .into_iter()
+            .map(|namespace| {
+                let count = rows.keys().filter(|(ns, _)| *ns == namespace).count();
+                NamespaceSummary {
+                    namespace,
+                    count,
+                    last_updated: None,
+                }
+            })
+            .collect())
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
@@ -637,4 +655,176 @@ async fn conformance_context_chunk_stamps() {
 #[tokio::test]
 async fn conformance_fact_store() {
     conformance::assert_fact_store(engine().facts()).await;
+}
+
+/// The port conformance suite over the REAL `namespace` driver — not the fake.
+///
+/// Everything above proves the decorator against `FakeEngine`; the driver
+/// tests in `driver.rs` prove the namespace driver against the raw provider
+/// contract. Neither proves the two composed: that the three ports a company
+/// actually holds — traces, chunks with search, facts — round-trip through
+/// `BoundMemory`'s facades into `tinymemory-core`'s durable store and back.
+/// This is that proof, run over the same shared asserts every other backend
+/// answers, so the embedded contract driver cannot quietly drift below the
+/// bar the fs/sqlite/mongodb stores are held to.
+#[cfg(feature = "tinymemory-embedded")]
+mod namespace_driver_conformance {
+    use super::*;
+    use crate::store::{FsCompanyStore, FsEventLog};
+
+    /// A `BoundMemory` over the real driver, plus the tempdir keeping the
+    /// store alive for the test's duration.
+    fn real_engine() -> (tempfile::TempDir, BoundMemory) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::store::memory::MemoryDriverConfig {
+            mode: crate::store::memory::MemoryMode::Embedded,
+            driver_id: Some("namespace".into()),
+            url: None,
+            api_key: None,
+            data_dir: Some(dir.path().to_path_buf()),
+        };
+        let (provider, class) = crate::store::memory::open_driver(&config)
+            .expect("the namespace driver binds")
+            .expect("embedded with a driver named yields a provider");
+        (dir, BoundMemory::bind(provider, class).unwrap())
+    }
+
+    #[tokio::test]
+    async fn isolation_by_company_holds_on_the_namespace_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store_dir, engine) = real_engine();
+        conformance::assert_isolation_by_company(
+            Arc::new(FsCompanyStore::new(dir.path().to_path_buf())),
+            Arc::new(FsEventLog::new(dir.path().to_path_buf())),
+            engine.memory(),
+            engine.context(),
+        )
+        .await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn export_totality_holds_on_the_namespace_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store_dir, engine) = real_engine();
+        conformance::assert_export_totality(
+            Arc::new(FsCompanyStore::new(dir.path().to_path_buf())),
+            Arc::new(FsEventLog::new(dir.path().to_path_buf())),
+            engine.memory(),
+            engine.context(),
+        )
+        .await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn the_fact_store_contract_holds_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_fact_store(engine.facts()).await;
+        drop(store_dir);
+    }
+
+    #[tokio::test]
+    async fn context_chunk_stamps_hold_on_the_namespace_driver() {
+        let (store_dir, engine) = real_engine();
+        conformance::assert_context_chunk_stamps(engine.context()).await;
+        drop(store_dir);
+    }
+}
+
+/// #914's acceptance names "taint survives export and re-import" and #1113
+/// found no test for it. This is the round trip: inbound content stored
+/// through the decorator (stamped `ExternalSync`), exported through the
+/// provider's portability family, imported into a *fresh* engine — and the
+/// taint must still be `ExternalSync` on the other side. A driver or a
+/// migration that laundered the stamp here would let content a company read
+/// from the web re-enter as something the company decided.
+#[tokio::test]
+async fn taint_survives_export_and_reimport() {
+    let (_fake, provider) = FakeEngine::with_handle();
+    let memory = BoundMemory::bind(provider.clone(), DriverClass::Embedded).unwrap();
+    memory
+        .inbound_context()
+        .put(
+            &acme_id(),
+            ContextChunk {
+                label: "web".into(),
+                body: "scraped from a page, must stay external".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let page = provider.export_page(None, 100).await.unwrap();
+    let exported: Vec<_> = page
+        .records
+        .iter()
+        .filter(|record| record.payload.to_string().contains("must stay external"))
+        .collect();
+    assert!(!exported.is_empty(), "the inbound chunk must export");
+    for record in &exported {
+        assert_eq!(
+            record.taint,
+            MemoryTaint::ExternalSync,
+            "export must carry the stamp, record {}",
+            record.id
+        );
+    }
+
+    let (importer, fresh) = FakeEngine::with_handle();
+    fresh.import_records(page.records).await.unwrap();
+    assert_eq!(
+        importer.taint_of("must stay external"),
+        Some(MemoryTaint::ExternalSync),
+        "re-import must land the content still stamped ExternalSync"
+    );
+}
+
+/// The fake's `namespace_summaries` is what the mandatory composition's export
+/// WALKS, so a wrong count or a duplicated namespace there silently weakens
+/// every export test built on it. The round trip above uses one namespace and
+/// cannot see either fault; this pins both directly.
+#[tokio::test]
+async fn namespace_summaries_reports_each_namespace_once_with_its_count() {
+    let (fake, provider) = FakeEngine::with_handle();
+    let memory = BoundMemory::bind(provider.clone(), DriverClass::Embedded).unwrap();
+
+    // Two companies so the namespaces differ, and differing key counts so a
+    // summary that reported the store's total instead of the namespace's
+    // would fail.
+    for (id, keys) in [(acme_id(), 3usize), (globex_id(), 1usize)] {
+        for index in 0..keys {
+            memory
+                .context()
+                .put(
+                    &id,
+                    ContextChunk {
+                        label: format!("chunk-{index}"),
+                        body: format!("body {index}"),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let summaries = fake.namespace_summaries().await.unwrap();
+    let mut namespaces: Vec<&str> = summaries.iter().map(|s| s.namespace.as_str()).collect();
+    namespaces.sort_unstable();
+    let mut deduped = namespaces.clone();
+    deduped.dedup();
+    assert_eq!(
+        namespaces, deduped,
+        "each namespace must appear exactly once"
+    );
+
+    let total: usize = summaries.iter().map(|s| s.count).sum();
+    assert_eq!(
+        total, 4,
+        "counts must sum to the rows stored: {summaries:?}"
+    );
+    assert!(
+        summaries.iter().any(|s| s.count == 3) && summaries.iter().any(|s| s.count == 1),
+        "each namespace must carry ITS own count, not the store total: {summaries:?}"
+    );
 }

@@ -1996,6 +1996,26 @@ impl TokenUsage {
 }
 
 /// Everything the brain needs to run one cycle.
+///
+/// **A cycle carries no working memory.** The struct once also carried
+/// `compressed_history` (32 recent [`CompressedTrace`]s) and `context_index`
+/// (every [`ChunkMeta`] in the company, unbounded), loaded from the
+/// [`MemoryStore`](crate::ports::MemoryStore) and
+/// [`ContextStore`](crate::ports::ContextStore) on every cycle — and read by no
+/// [`Brain`](crate::ports::Brain) implementation. Two facts made them dead
+/// rather than merely unused: no summariser exists anywhere in the crate, so a
+/// trace's `summary` is a constant string like `harness cycle handled 3
+/// event(s)`, and no brain ever consulted either field. A `roster` field was
+/// dead on the same terms; every brain re-derives the roster from the company
+/// record. Issue #1175 removed all three, so the cycle stops paying an
+/// unbounded full scan per turn for a `Vec` it drops.
+///
+/// The one live recall path is elsewhere and is untouched by this: before each
+/// turn `HarnessPool::run` retrieves the top-5 prior task outcomes from the
+/// `ContextStore` and injects them as text (`src/harness/memory_loop.rs`, under
+/// the `openhuman` feature). Traces are still *written* every cycle
+/// (they travel with the export bundle); nothing reads them back. Do not
+/// re-add a field here until something consumes it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CycleRequest {
     /// Unique id for this cycle.
@@ -2011,12 +2031,6 @@ pub struct CycleRequest {
     /// idempotent `POST /events` on the durable log seq.
     #[serde(default)]
     pub event_seqs: Vec<EventSeq>,
-    /// Compressed traces of prior cycles.
-    pub compressed_history: Vec<CompressedTrace>,
-    /// The company roster (agent ids).
-    pub roster: Vec<String>,
-    /// The context index available to the brain.
-    pub context_index: Vec<ChunkMeta>,
 }
 
 /// The brain's output from one cycle.

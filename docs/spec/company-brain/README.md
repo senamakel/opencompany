@@ -17,7 +17,7 @@ CompanyBrain
 ├── identity   CompanyId (ULID), Ed25519 keypair, tiny.place @handle, Agent Card
 ├── charter    name, output, mission, human_role, policies (mutable at runtime)
 ├── roster     teammates: id, role, description, tier hint, tool grants, budgets
-├── memory     compressed cycle traces (~20:1 working memory) + task results
+├── memory     compressed cycle traces + task results
 ├── context    addressable chunks (the RLM environment: put/list/peek/search)
 ├── world      event log (append-only), ledger, open tasks, approval queue
 └── feedback   inbox of feedback items + links to filed GitHub issues

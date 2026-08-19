@@ -3198,7 +3198,9 @@ dependencies = [
  "tinyflows",
  "tinymemory",
  "tinymemory-api",
+ "tinymemory-core",
  "tinymemory-remote",
+ "tinymemory-tinycortex",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3215,7 +3217,7 @@ dependencies = [
 
 [[package]]
 name = "openhuman"
-version = "0.63.9"
+version = "0.63.11"
 dependencies = [
  "aes-gcm",
  "aho-corasick",

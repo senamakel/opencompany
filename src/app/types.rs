@@ -161,6 +161,26 @@ pub fn namespace_company_id(tenant: &str, id: CompanyId) -> CompanyId {
     }
 }
 
+/// A tenant namespace must not contain the `--` id delimiter.
+///
+/// [`namespace_company_id`] and `app::orphans::filter_to_tenant` both encode a
+/// tenant as the `<tenant>--` prefix, so a namespace containing `--` makes the
+/// encoding ambiguous: `acme` namespacing `other--company` collides with
+/// `acme--other` namespacing `company`, and the shorter tenant's filter then
+/// claims the longer tenant's ids. Reject the delimiter at the boundary that
+/// reads `OPENCOMPANY_TENANT_ID` so a malformed namespace fails loudly instead
+/// of silently misattributing another tenant's companies.
+pub fn validate_tenant_namespace(tenant: &str) -> Result<(), String> {
+    if tenant.contains("--") {
+        Err(format!(
+            "tenant namespace `{tenant}` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// The canonical form of a tenant identifier for ownership: the bare slug, with
 /// any leading `tenant:` prefix stripped.
 ///
@@ -1498,6 +1518,20 @@ mod tests {
         // Only the leading `tenant:` is stripped, and only once.
         assert_eq!(canonical_tenant("company:acme"), "company:acme");
         assert_eq!(canonical_tenant("tenant:tenant:x"), "tenant:x");
+    }
+
+    #[test]
+    fn tenant_namespace_rejects_the_id_delimiter() {
+        // A namespace containing `--` makes the `<tenant>--` id prefix
+        // ambiguous between tenants, so the boundary that reads
+        // `OPENCOMPANY_TENANT_ID` rejects it.
+        assert!(validate_tenant_namespace("acme").is_ok());
+        assert!(validate_tenant_namespace("acme-corp").is_ok());
+        assert_eq!(
+            validate_tenant_namespace("acme--other").unwrap_err(),
+            "tenant namespace `acme--other` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        );
     }
 
     #[test]

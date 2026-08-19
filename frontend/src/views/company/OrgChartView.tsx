@@ -48,9 +48,11 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   addMemberFailure,
+  addOutcome,
   NO_TEAM_WRITE_PLANE,
   reportAddMember,
   type AddMemberOutcome,
+  type MissedStep,
 } from "@/lib/member-feedback";
 import {
   addableTo,
@@ -134,7 +136,16 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
   const [focusMark, setFocusMark] = useState<string | null>(null);
   const chartRef = useRef<HTMLDivElement | null>(null);
 
-  const boot = useCallback(async () => {
+  /**
+   * Re-read the whole chart. Answers whether it landed.
+   *
+   * A read superseded by a newer one counts as landed: another `boot` owns the
+   * screen and will settle it, so reporting a reload failure for it would warn
+   * about a chart nobody is looking at. Only the catch is a real miss, and
+   * `addMember` is the only caller that asks — everything else fires and
+   * forgets, which is why this reports rather than rejects.
+   */
+  const boot = useCallback(async (): Promise<boolean> => {
     const mine = ++gen.current;
     try {
       // Desks are the only required half — they are the chart. The roster and
@@ -156,7 +167,7 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
           .catch(() => [] as OrgPerson[]),
         client.status(company).catch(() => null),
       ]);
-      if (mine !== gen.current) return;
+      if (mine !== gen.current) return true;
       // Cleared here rather than at the top of the write that triggered this
       // read: since #1099 the banner belongs to the load alone, so a chart that
       // loads is the only thing that can retire the message saying it did not.
@@ -170,14 +181,16 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         ),
       );
       setLoad("ready");
+      return true;
     } catch (e) {
-      if (mine !== gen.current) return;
+      if (mine !== gen.current) return true;
       // A failed `/desks` is a real error, not an empty company. Inventing an
       // empty chart here would tell the operator their desks are gone.
       setError(
         e instanceof Error ? e.message : "Could not load the org chart.",
       );
       setLoad("error");
+      return false;
     }
   }, [client, company]);
 
@@ -305,6 +318,9 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
     // `boot()`, so a refetch that contradicts the write contradicts the message
     // too rather than arriving a beat behind it.
     let outcome: AddMemberOutcome;
+    // Every step of the ask that did not land, in the order the operator met
+    // them. Empty is the only thing that earns "Added <name>.".
+    const missed: MissedStep[] = [];
     try {
       let created: TeamMemberDto;
       try {
@@ -328,7 +344,6 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         }
         throw e;
       }
-      outcome = { kind: "added", name: fields.name };
       if (deskId) {
         try {
           await client.addDeskMember(deskId, created.id, company);
@@ -336,15 +351,22 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
           // Created but unplaced — a real half-landing, and the operator has
           // to know which half, because the fix is on the chart in front of
           // them rather than in the dialog they just closed.
-          outcome = {
-            kind: "partial",
-            name: fields.name,
-            missed: `they couldn't be added to that desk: ${e instanceof Error ? e.message : "unknown error"}`,
-            fix: "They're on the roster — drag them onto the desk from here.",
-          };
+          missed.push({
+            what: `they couldn't be added to that desk: ${e instanceof Error ? e.message : "unknown error"}`,
+            fix: "They're on the roster — drag them onto the desk from the chart.",
+          });
         }
       }
-      await boot();
+      if (!(await boot())) {
+        // The chart is on its error state behind this toast. Congratulating the
+        // operator over a banner saying the chart could not be loaded is the
+        // contradiction #1099 set out to remove, not one to add.
+        missed.push({
+          what: "the chart couldn't be read back",
+          fix: "Retry to see where they landed.",
+        });
+      }
+      outcome = addOutcome(fields.name, missed);
       setAddMemberOpen(false);
     } catch (e) {
       setAddMemberOpen(false);

@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> Router {
 fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router {
     let router = Router::new()
         .route("/healthz", get(healthz))
+        .route("/healthz/busy", get(busy))
         .route("/spec", get(spec))
         .route("/tiny", get(tiny))
         .merge(crate::server::operator::router())
@@ -395,6 +396,43 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Whether this workload is doing anything — the signal the manager consults
+/// before scaling the tenant to zero (opencompany-microservice#22).
+///
+/// The manager measures "idle" by inbound proxied traffic alone, so a company
+/// working through a long turn produces none of its own and looks exactly like
+/// one nobody has opened. Parking it there destroys the work in flight. This
+/// answers the question the manager cannot infer.
+///
+/// Deliberately a **sibling** of `/healthz` rather than a field on it. The
+/// wake-on-request proxy blocks on `/healthz` and gives up after its startup
+/// budget, so anything that makes that endpoint slower or heavier directly
+/// degrades every cold start — a hard constraint in the issue.
+///
+/// Asks each company runtime, which combines three sources — the per-company
+/// cycle lock, the workflow run supervisor, and the in-flight steer registry.
+/// No one of them sees all the work: the first version of this endpoint read
+/// only the last and therefore missed the top-level operator chat turn, which
+/// is the case #22 actually measured.
+///
+/// Holds no lock across an await and does no I/O. The cost is a non-blocking
+/// `try_lock`, a `RwLock` read to enumerate companies, and one `Mutex`
+/// acquisition each — the manager calls this once per idle tenant per scan
+/// against a short timeout, so anything that could block would stall the sweep.
+///
+/// Unauthenticated on purpose. It reveals one boolean about the workload the
+/// caller can already reach, and requiring a credential would mean the manager
+/// holding a per-tenant secret purely to ask whether to stop it.
+async fn busy(State(state): State<AppState>) -> Json<BusyResponse> {
+    let busy = state
+        .registry()
+        .list()
+        .into_iter()
+        .filter_map(|id| state.registry().get(&id))
+        .any(|runtime| runtime.is_busy());
+    Json(BusyResponse { busy })
+}
+
 async fn spec(State(state): State<AppState>) -> Json<crate::app::AppSpec> {
     Json(state.spec())
 }
@@ -406,6 +444,11 @@ async fn tiny(State(state): State<AppState>) -> Json<Vec<crate::tiny::RuntimeMod
 #[derive(Clone, Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct BusyResponse {
+    busy: bool,
 }
 
 #[cfg(test)]
@@ -638,6 +681,67 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// An idle workload reports `busy: false`, so the manager parks it as it
+    /// always has.
+    ///
+    /// Note what this does *not* prove: with an empty registry the handler
+    /// iterates nothing and returns `false` without consulting any runtime, so
+    /// this cannot fail for an aggregation bug. The direction that matters —
+    /// that the endpoint can report `true` — is covered by
+    /// `is_busy_sees_a_cycle_holding_the_serial_lock` in `company::runtime`,
+    /// which exercises the real signal against a real runtime.
+    #[tokio::test]
+    async fn busy_is_false_when_nothing_is_running() {
+        let app = router(AppState::new(AppConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/busy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["busy"], serde_json::Value::Bool(false), "{json}");
+    }
+
+    /// The wire shape the manager parses. It reads a top-level boolean `busy`
+    /// and treats anything else — a missing field, a rename, a string `"true"` —
+    /// as *not busy*, so a change here would silently stop protecting work in
+    /// flight rather than fail loudly.
+    #[tokio::test]
+    async fn busy_responds_with_the_shape_the_manager_parses() {
+        let app = router(AppState::new(AppConfig::default()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/busy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.get("busy")
+                .and_then(serde_json::Value::as_bool)
+                .is_some(),
+            "the manager reads a top-level boolean `busy`; got {json}"
+        );
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
         let app = router(AppState::new(AppConfig::default()));
@@ -797,7 +901,6 @@ mod tests {
             memory_driver: Some("supermemory".to_string()),
             memory_url: Some(ENDPOINT.to_string()),
             memory_api_key: Some(KEY.to_string()),
-            allow_unproven_remote: true,
             ..Default::default()
         })
         .expect("a fully configured remote engine binds")

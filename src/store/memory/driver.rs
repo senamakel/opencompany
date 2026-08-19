@@ -8,28 +8,59 @@
 //! embedded and skip the egress and trust checks the class gates — so this
 //! module never asks a provider what it is.
 //!
-//! # Why `embedded` does not go through this seam yet
+//! # How `embedded` goes through this seam — and what still does not
 //!
-//! [`MemoryMode::Embedded`] deliberately resolves to the existing `EngineCortex`
-//! overlay rather than to a provider built here, and that is a durability
-//! decision rather than an unfinished edge.
+//! [`MemoryMode::Embedded`] has two shapes, told apart by whether the operator
+//! named a driver:
 //!
-//! The obvious construction — `tinymemory_tinycortex::provider(…)` over a
-//! `tinycortex::memory::Memory` backend — cannot currently be durable: the only
-//! concrete `Memory` implementation in the vendored engine is
-//! `InMemoryMemoryStore`, a `BTreeMap` behind an `RwLock`. Binding it would
-//! swap today's per-company SQLite workspaces under `<data_dir>/memory/` for a
-//! store that is empty after every restart, and it would do so *silently* — the
-//! reads would all succeed, returning nothing.
+//! - **No driver named** (`OPENCOMPANY_MEMORY=embedded` alone): the incumbent
+//!   `EngineCortex` overlay, exactly as it has always been. It does not pass
+//!   through this module at all — [`open_driver`] answers `Ok(None)` and the
+//!   caller keeps the engine path. Today's companies have their data in those
+//!   tables, and swapping the default out from under them would strand it.
+//! - **`OPENCOMPANY_MEMORY_DRIVER=namespace`**: the contract's own durable
+//!   store, bound *through* this seam. `tinymemory-core`'s `UnifiedMemory` is
+//!   a per-deployment SQLite store that implements the contract's `Memory`
+//!   trait (`core/src/store/memory_trait.rs`, reporting `name() ==
+//!   "namespace"`); it is composed into a driver with
+//!   `tinymemory::mandatory::MemoryTraitProvider`, admitted under the
+//!   host-reserved `namespace` id, audited at bind time, and handed to the
+//!   same tenant-namespace facades the hosted engines use. No network call;
+//!   persists under `<data_dir>/memory-namespace/`.
 //!
-//! This deployment already refuses that class of failure out loud (see the
-//! ephemeral-`/data` refusal in `crate::store::select`), so quietly introducing
-//! it through a contract migration would be a strange thing to do. Moving the
-//! embedded engine onto the provider seam needs a durable `Memory`
-//! implementation over the engine's KV tier first; until that exists, `embedded`
-//! keeps the durable path it has always had, and `remote` and `null` — which
-//! have no incumbent to regress — bind providers here.
-
+//! An earlier version of this note listed four obstacles to the second shape.
+//! Three are resolved by the shape itself and one is a real cost, taken
+//! knowingly — recorded here so the decisions stay visible:
+//!
+//! 1. **Composition.** `MemoryTraitProvider` advertises the mandatory three
+//!    families and nothing else. That was an argument against *replacing*
+//!    `EngineCortex` with it, and it still is; as a mode **beside** the
+//!    incumbent it is simply the truth about this driver, and the bind-time
+//!    audit holds because the advertisement is derived.
+//! 2. **The id.** The registry reserves `null`, `tinycortex`, `supermemory`,
+//!    `mem0` and `cognee`; `namespace` is not among them. The registry's own
+//!    `with_reserved` exists for exactly this — "a host that bundles an
+//!    adapter this crate does not know about" — so [`admit`] reserves it at
+//!    [`DriverClass::Embedded`] host-side.
+//! 3. **A different store.** True, and answered by being additive: the
+//!    incumbent keeps `<data_dir>/memory/`, this driver keeps
+//!    `<data_dir>/memory-namespace/`, and nothing migrates. An operator who
+//!    switches modes starts that store empty, which the mode's own docs say
+//!    out loud.
+//! 4. **The dependency.** `tinymemory-core` pulls `tinycortex` (with
+//!    `obsidian`, `persona`, `people`, `sync`) and `tinyagents/sqlite` — the
+//!    bundled-SQLite weight the manifest keeps out of hosted-memory tenants
+//!    (tinymemory#18 §D). This is the cost that cannot be reasoned away, so it
+//!    is opt-in: the `tinymemory-embedded` feature, separate from `tinymemory`,
+//!    which `remote` and `null` still serve alone.
+//!
+//! Recall honesty: this build injects no embedding backend
+//! (`NoopEmbedding`), so `UnifiedMemory` stores every chunk vector-less and
+//! recall runs on its graph and keyword tiers. That is the same degraded-mode
+//! contract `EngineCortex` ships under, and it is announced loudly at bind —
+//! never mistaken for semantic recall.
+//!
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinymemory::registry::{
@@ -50,6 +81,11 @@ use crate::error::OpenCompanyError;
 pub enum MemoryMode {
     /// The engine runs in-pod against `OPENCOMPANY_DATA_DIR`. No network call,
     /// works with a read-only root filesystem.
+    ///
+    /// Two shapes: with no driver named, the incumbent `EngineCortex` overlay
+    /// (this module answers `Ok(None)`); with
+    /// `OPENCOMPANY_MEMORY_DRIVER=namespace`, the contract's durable
+    /// `UnifiedMemory` store bound through this seam. See the module docs.
     Embedded,
     /// A hosted memory service behind a URL and a credential.
     Remote,
@@ -69,9 +105,10 @@ pub enum MemoryMode {
 pub struct MemoryDriverConfig {
     /// The selected mode.
     pub mode: MemoryMode,
-    /// The driver id (`supermemory`, `mem0`, `cognee`, `null`, …).
+    /// The driver id (`supermemory`, `mem0`, `cognee`, `namespace`, `null`, …).
     ///
-    /// `None` takes the mode's default: `null` for [`MemoryMode::Null`], and for
+    /// `None` takes the mode's default: `null` for [`MemoryMode::Null`], the
+    /// incumbent engine overlay for [`MemoryMode::Embedded`], and for
     /// [`MemoryMode::Remote`] there is no default — an unnamed remote engine is
     /// a refusal, because guessing which hosted service an operator meant is
     /// not a recoverable mistake.
@@ -80,6 +117,11 @@ pub struct MemoryDriverConfig {
     pub url: Option<String>,
     /// The outbound credential. Required for [`MemoryMode::Remote`].
     pub api_key: Option<String>,
+    /// The durable data root, for the in-pod contract driver
+    /// ([`MemoryMode::Embedded`] naming `namespace`). The store opens under
+    /// `<data_dir>/memory-namespace/` — deliberately beside, never inside, the
+    /// incumbent engine's `<data_dir>/memory/`.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for MemoryDriverConfig {
@@ -119,16 +161,17 @@ impl From<MemoryDriverError> for OpenCompanyError {
 fn labels() -> ConfigLabels<'static> {
     ConfigLabels {
         section: "OPENCOMPANY_MEMORY",
-        drivers: "[memory]",
-        driver_entry: "[memory]",
+        drivers: "OPENCOMPANY_MEMORY_DRIVER",
+        driver_entry: "OPENCOMPANY_MEMORY_DRIVER",
     }
 }
 
 /// Opens the configured driver, returning it with the class the *host* assigned.
 ///
-/// `Ok(None)` means [`MemoryMode::Embedded`]: the caller keeps the existing
-/// `EngineCortex` overlay rather than binding a provider here. See the module
-/// docs for why that is a durability decision and not an omission.
+/// `Ok(None)` means [`MemoryMode::Embedded`] with no driver named: the caller
+/// keeps the existing `EngineCortex` overlay rather than binding a provider
+/// here. Embedded *with* `OPENCOMPANY_MEMORY_DRIVER=namespace` binds the
+/// contract's durable in-pod store through this seam — see the module docs.
 ///
 /// # Errors
 ///
@@ -140,7 +183,31 @@ pub fn open_driver(
     config: &MemoryDriverConfig,
 ) -> Result<Option<(Arc<dyn MemoryProvider>, DriverClass)>> {
     let bound: (Arc<dyn MemoryProvider>, DriverClass) = match config.mode {
-        MemoryMode::Embedded => return Ok(None),
+        MemoryMode::Embedded => {
+            let Some(driver_id) = config
+                .driver_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                // The incumbent engine overlay, untouched. Deliberately not a
+                // bind through this seam — see the module docs.
+                return Ok(None);
+            };
+            if driver_id != NAMESPACE_DRIVER_ID {
+                return Err(MemoryDriverError(format!(
+                    "OPENCOMPANY_MEMORY=embedded with OPENCOMPANY_MEMORY_DRIVER=\
+                     {driver_id} names a driver this mode cannot bind. The only \
+                     embedded contract driver is `{NAMESPACE_DRIVER_ID}`; unset \
+                     OPENCOMPANY_MEMORY_DRIVER to keep the incumbent engine \
+                     overlay, or switch OPENCOMPANY_MEMORY=remote for a hosted \
+                     engine."
+                ))
+                .into());
+            }
+            let class = admit(NAMESPACE_DRIVER_ID, DriverClass::Embedded)?;
+            (namespace_provider(config)?, class)
+        }
         MemoryMode::Null => {
             let admission = admit(NULL_DRIVER_ID, DriverClass::Null)?;
             (
@@ -156,8 +223,8 @@ pub fn open_driver(
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
                     MemoryDriverError(format!(
-                        "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_DRIVER (or \
-                         [memory].provider) naming the hosted engine — one of {}. There is no \
+                        "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_DRIVER \
+                         naming the hosted engine — one of {}. There is no \
                          default: binding the wrong hosted engine writes a company's memory \
                          somewhere it cannot be read back from.",
                         SUPPORTED_REMOTE_DRIVERS.join(", ")
@@ -165,13 +232,13 @@ pub fn open_driver(
                 })?;
             let url = require(
                 config.url.as_deref(),
-                "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_URL (or [memory].base_url) \
+                "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_URL \
                  naming the hosted engine's endpoint",
             )?;
             let key = require(
                 config.api_key.as_deref(),
                 "OPENCOMPANY_MEMORY=remote requires a credential: set OPENCOMPANY_MEMORY_API_KEY, \
-                 or name a SecretStore key with [memory].api_key_secret",
+                — the key is a secret and env is its only channel",
             )?;
             let class = admit(driver_id, DriverClass::External)?;
             (remote_provider(driver_id, url, key)?, class)
@@ -262,7 +329,13 @@ fn require<'a>(value: Option<&'a str>, refusal: &str) -> Result<&'a str> {
 ///    under the checks meant for the other class — so it is refused rather than
 ///    quietly resolved in the registry's favour.
 fn admit(driver_id: &str, expected: DriverClass) -> Result<DriverClass> {
-    let registry = DriverRegistry::builtin();
+    // `namespace` is `tinymemory-core`'s own durable store; the vendored
+    // registry does not know it, and `with_reserved` is the registry's door
+    // for exactly that ("a host that bundles an adapter this crate does not
+    // know about"). Reserved unconditionally — with the `tinymemory-embedded`
+    // feature off, nothing reaches this function with that id.
+    let registry =
+        DriverRegistry::builtin().with_reserved(NAMESPACE_DRIVER_ID, DriverClass::Embedded);
     // Trust is asserted by the host for a driver the host itself selected from
     // its own configuration: reaching this line already means the operator named
     // the engine and supplied its endpoint and credential. The registry's
@@ -333,13 +406,92 @@ fn remote_provider(driver_id: &str, url: &str, key: &str) -> Result<Arc<dyn Memo
 fn open_failed(error: anyhow::Error) -> OpenCompanyError {
     OpenCompanyError::Config(format!(
         "could not open the configured memory engine: {error}. \
-         Check OPENCOMPANY_MEMORY_URL (or [memory].base_url)."
+         Check OPENCOMPANY_MEMORY_URL."
     ))
 }
 
 /// The driver ids this build can actually construct, for error text and docs.
 pub const SUPPORTED_REMOTE_DRIVERS: [&str; 3] =
     [SUPERMEMORY_DRIVER_ID, MEM0_DRIVER_ID, COGNEE_DRIVER_ID];
+
+/// The contract's own durable store, as a driver id.
+///
+/// The value matches what the driver reports: `UnifiedMemory`'s `Memory`
+/// implementation answers `name() == "namespace"`, and a bound driver whose
+/// configured id disagreed with its reported id would make status output lie.
+pub const NAMESPACE_DRIVER_ID: &str = "namespace";
+
+/// The subdirectory of the data root holding the contract driver's store.
+///
+/// Beside — never inside — the incumbent engine's `memory/`: `UnifiedMemory`
+/// lays out `namespaces/`, `vectors/` and `memory.db` under its root, and
+/// `EngineCortex` mints a subdirectory per company under its own, so sharing
+/// one directory would interleave the two schemas and put a company named
+/// anything that sanitises to `namespaces` on top of the store's own layout.
+const NAMESPACE_STORE_SUBDIR: &str = "memory-namespace";
+
+/// Builds the in-pod contract driver over `tinymemory-core`'s durable store.
+///
+/// Same composition honesty as [`remote_provider`]: `MemoryTraitProvider`
+/// advertises exactly Core + Recall + Portability and leaves every optional
+/// accessor `None`, which is the truth about this driver and what makes the
+/// bind-time audit pass by construction.
+#[cfg(feature = "tinymemory-embedded")]
+fn namespace_provider(config: &MemoryDriverConfig) -> Result<Arc<dyn MemoryProvider>> {
+    let Some(data_dir) = config.data_dir.as_deref() else {
+        return Err(MemoryDriverError(format!(
+            "OPENCOMPANY_MEMORY_DRIVER={NAMESPACE_DRIVER_ID} persists to \
+             <data_dir>/{NAMESPACE_STORE_SUBDIR}/ and no data dir is configured. \
+             Set OPENCOMPANY_DATA_DIR to a durable path. There is deliberately \
+             no in-memory fallback: a store that answers every read and \
+             remembers nothing is the failure this surface exists to prevent."
+        ))
+        .into());
+    };
+    // No embedding backend is injected: every chunk is stored vector-less and
+    // recall runs on the store's graph and keyword tiers. The same loud
+    // degraded-mode contract the incumbent engine ships under.
+    tracing::warn!(
+        data_dir = %data_dir.display(),
+        "OPENCOMPANY_MEMORY_DRIVER=namespace is running in DEGRADED lexical/graph recall mode: \
+         no embeddings backend is injected, so recall is keyword/graph ranking, NOT \
+         vector/semantic recall.",
+    );
+    let memory = tinymemory_core::store::UnifiedMemory::new_with_memory_dir(
+        data_dir,
+        NAMESPACE_STORE_SUBDIR,
+        Arc::new(tinymemory_api::host::NoopEmbedding),
+        None,
+    )
+    .map_err(|error| {
+        MemoryDriverError(format!(
+            "could not open the embedded contract store under the data dir: {error}. \
+             Check that OPENCOMPANY_DATA_DIR exists and is writable."
+        ))
+    })?;
+    // `UnifiedMemory` speaks the engine-side `Memory` trait; `TinycortexMemory`
+    // is the adapter that converts its vocabulary to the contract's. The id is
+    // this driver's own, not the adapter's `tinycortex` — that name belongs to
+    // the incumbent engine overlay, and the store here reports `namespace`.
+    Ok(Arc::new(tinymemory::mandatory::MemoryTraitProvider::new(
+        Arc::new(tinymemory_tinycortex::TinycortexMemory::new(Arc::new(
+            memory,
+        ))),
+        NAMESPACE_DRIVER_ID,
+    )))
+}
+
+/// Without the `tinymemory-embedded` feature the in-pod contract driver cannot
+/// be served, so it refuses rather than silently resolving to something else —
+/// the same contract as `open_provider`'s feature refusal in `store::select`.
+#[cfg(not(feature = "tinymemory-embedded"))]
+fn namespace_provider(_config: &MemoryDriverConfig) -> Result<Arc<dyn MemoryProvider>> {
+    Err(MemoryDriverError(format!(
+        "OPENCOMPANY_MEMORY_DRIVER={NAMESPACE_DRIVER_ID} requires a build with the \
+         `tinymemory-embedded` feature"
+    ))
+    .into())
+}
 
 #[cfg(test)]
 mod test {
@@ -352,6 +504,7 @@ mod test {
             driver_id: None,
             url: None,
             api_key: None,
+            data_dir: None,
         }
     }
 
@@ -495,6 +648,106 @@ mod test {
     }
 
     #[test]
+    fn embedded_refuses_a_driver_id_that_is_not_namespace() {
+        // Never a silent fallback to the engine the operator did not name: an
+        // unknown id under the embedded mode is a refusal that names the one
+        // id this mode can bind.
+        let mut cfg = config(MemoryMode::Embedded);
+        cfg.driver_id = Some(SUPERMEMORY_DRIVER_ID.into());
+        let error = open_driver(&cfg).err().unwrap().to_string();
+        assert!(error.contains(NAMESPACE_DRIVER_ID), "{error}");
+        assert!(error.contains("OPENCOMPANY_MEMORY_DRIVER"), "{error}");
+    }
+
+    #[test]
+    fn a_blank_embedded_driver_id_keeps_the_existing_overlay() {
+        // An env var set to the empty string is the shape a broken deployment
+        // template produces; it must mean "not set", exactly as it does for the
+        // remote credential.
+        let mut cfg = config(MemoryMode::Embedded);
+        cfg.driver_id = Some("  ".into());
+        assert!(open_driver(&cfg).unwrap().is_none());
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_without_a_data_dir_refuses_and_names_the_knob() {
+        // No in-memory fallback: a store that answers every read and remembers
+        // nothing is the exact failure this surface exists to prevent.
+        let mut cfg = config(MemoryMode::Embedded);
+        cfg.driver_id = Some(NAMESPACE_DRIVER_ID.into());
+        let error = open_driver(&cfg).err().unwrap().to_string();
+        assert!(error.contains("OPENCOMPANY_DATA_DIR"), "{error}");
+    }
+
+    #[cfg(not(feature = "tinymemory-embedded"))]
+    #[test]
+    fn the_namespace_driver_without_the_feature_names_the_feature() {
+        let mut cfg = config(MemoryMode::Embedded);
+        cfg.driver_id = Some(NAMESPACE_DRIVER_ID.into());
+        let error = open_driver(&cfg).err().unwrap().to_string();
+        assert!(error.contains("tinymemory-embedded"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_binds_durable_survives_reopen_and_passes_the_audit() {
+        // The full claim, end to end: it binds as class Embedded under the
+        // reserved id, its advertisement survives the same audit every other
+        // driver faces, a stored entry recalls through the contract, and — the
+        // property the incumbent was kept for — the store is still there after
+        // the driver is dropped and reopened.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(MemoryMode::Embedded);
+        cfg.driver_id = Some(NAMESPACE_DRIVER_ID.into());
+        cfg.data_dir = Some(dir.path().to_path_buf());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        {
+            let (provider, class) = open_driver(&cfg).unwrap().unwrap();
+            assert_eq!(class, DriverClass::Embedded);
+            assert_eq!(provider.driver_id(), NAMESPACE_DRIVER_ID);
+            assert!(
+                tinymemory_api::provider::audit_provider(provider.as_ref()).is_ok(),
+                "the namespace driver failed its capability audit"
+            );
+            runtime
+                .block_on(provider.store(
+                    "oc/test",
+                    "fact-1",
+                    "the build is green",
+                    tinymemory_api::types::MemoryCategory::Core,
+                    None,
+                    tinymemory_api::types::MemoryTaint::Internal,
+                ))
+                .unwrap();
+        }
+
+        // A second bind against the same data dir must read the first bind's
+        // write back — this is the durability the module docs promise, and the
+        // property that separates this driver from the in-memory engine the
+        // old module docs warned about.
+        let (reopened, _) = open_driver(&cfg).unwrap().unwrap();
+        let entry = runtime
+            .block_on(reopened.get("oc/test", "fact-1"))
+            .unwrap()
+            .expect("the entry stored before the reopen must still be there");
+        assert_eq!(entry.content, "the build is green");
+        // And it landed under the driver's own subdirectory, beside — not
+        // inside — the incumbent engine's `memory/`.
+        assert!(
+            dir.path()
+                .join("memory-namespace")
+                .join("memory.db")
+                .exists()
+        );
+    }
+
+    #[test]
     fn null_binds_and_is_class_null() {
         let (provider, class) = open_driver(&config(MemoryMode::Null)).unwrap().unwrap();
         assert_eq!(class, DriverClass::Null);
@@ -526,13 +779,16 @@ mod test {
     }
 
     #[test]
-    fn remote_without_a_credential_refuses_and_names_both_ways_to_supply_one() {
+    fn remote_without_a_credential_refuses_and_names_the_knob() {
         let mut cfg = config(MemoryMode::Remote);
         cfg.driver_id = Some(SUPERMEMORY_DRIVER_ID.into());
         cfg.url = Some("https://memory.example".into());
         let error = open_driver(&cfg).err().unwrap().to_string();
         assert!(error.contains("OPENCOMPANY_MEMORY_API_KEY"), "{error}");
-        assert!(error.contains("api_key_secret"), "{error}");
+        // The refusal must not resurrect the phantom manifest knob (#1113):
+        // env is the credential's only channel, and the message says so.
+        assert!(!error.contains("api_key_secret"), "{error}");
+        assert!(error.contains("only channel"), "{error}");
     }
 
     #[test]
@@ -593,6 +849,7 @@ mod test {
             driver_id: Some(SUPERMEMORY_DRIVER_ID.into()),
             url: Some("https://memory.internal.example".into()),
             api_key: Some("sk-super-secret-value".into()),
+            data_dir: None,
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("sk-super-secret-value"), "{rendered}");

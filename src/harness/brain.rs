@@ -3281,9 +3281,6 @@ description = "Runs Acme."
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
-            compressed_history: Vec::new(),
-            roster: Vec::new(),
-            context_index: Vec::new(),
         }
     }
 
@@ -7062,9 +7059,6 @@ members = ["eng1", "eng2"]
             company_id: CompanyId::new("acme"),
             events,
             event_seqs: Vec::new(),
-            compressed_history: Vec::new(),
-            roster: vec!["ceo".to_string()],
-            context_index: Vec::new(),
         }
     }
 

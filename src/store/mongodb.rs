@@ -4267,6 +4267,81 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// Issue #1077: the orphan report composes `list()` and `owners()`
+    /// correctly against a real server.
+    ///
+    /// The pure set difference is unit-tested in `app::orphans`. What only a
+    /// live backend can prove is that the two reads are *comparable* — that
+    /// `owners()` keys on the same id string `list()` returns. They do
+    /// (`company_id` in both collections), but nothing in the type system says
+    /// so: both sides are `CompanyId`, and if one had been namespaced and the
+    /// other bare, the report would have called every company on the platform
+    /// an orphan while still type-checking and still passing every unit test.
+    ///
+    /// Namespaced ids specifically, because that is the only mode in which the
+    /// `owners` collection is load-bearing at all.
+    #[tokio::test]
+    async fn orphaned_companies_are_found_through_the_real_ports() {
+        let Some(s) = store().await else { return };
+
+        let manifest: CompanyManifest = toml::from_str("[company]\nname = \"Acme\"\n").unwrap();
+        let owned = crate::app::namespace_company_id("tenant-a", CompanyId::new("owned"));
+        let orphan = crate::app::namespace_company_id("tenant-a", CompanyId::new("orphan"));
+
+        for id in [&owned, &orphan] {
+            let record = CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".into(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            };
+            s.save(&record).await.expect("save company");
+        }
+        // Only one of the two gets an owner row. The other is exactly the state
+        // a failed `set_owner` used to leave behind before #1050 was fixed.
+        s.set_owner(&owned, "tenant-a").await.expect("record owner");
+        // ...plus a row naming a company that was never saved, which is the
+        // benign direction #1073 deliberately prefers on a rolled-back provision.
+        let ghost = crate::app::namespace_company_id("tenant-a", CompanyId::new("ghost"));
+        s.set_owner(&ghost, "tenant-a").await.expect("record ghost");
+
+        let companies = CompanyStore::list(s.as_ref()).await.expect("list");
+        let owners = s.owners().await.expect("owners");
+        let report = crate::app::find_orphans(&companies, &owners);
+
+        let unowned: Vec<&str> = report.unowned.iter().map(|c| c.id.as_ref()).collect();
+        assert!(
+            unowned.contains(&orphan.as_ref()),
+            "the company with no owner row must be reported: {report:?}"
+        );
+        assert!(
+            !unowned.contains(&owned.as_ref()),
+            "the company WITH an owner row must not be: {report:?}"
+        );
+        let dangling: Vec<&str> = report.dangling.iter().map(|r| r.id.as_ref()).collect();
+        assert!(
+            dangling.contains(&ghost.as_ref()),
+            "the owner row naming no company must be reported: {report:?}"
+        );
+        assert!(
+            !dangling.contains(&owned.as_ref()),
+            "a row whose company exists must not be: {report:?}"
+        );
+
+        drop_db(&s).await;
+    }
+
     /// Shared-single-DB namespacing: two tenants registering the same template
     /// name land distinct namespaced ids in one database, so the `companies`
     /// unique index never conflicts, and the `owners` rows carry the right

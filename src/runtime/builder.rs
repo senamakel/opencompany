@@ -4044,6 +4044,169 @@ mod test {
         );
     }
 
+    /// **Issue #1059.** A runtime with no agent pool says so when a card is
+    /// dispatched, instead of leaving it inert in silence.
+    ///
+    /// The silence was the whole bug: `dispatch_task` returned without minting a
+    /// run, journalling anything or logging, so a card dragged into In Progress
+    /// simply sat there. Everything upstream looked healthy — the write returned
+    /// 200 and the card moved — and there was nothing to grep for.
+    ///
+    /// Asserted through a capturing subscriber rather than by reading the code,
+    /// because "it logs" is exactly the claim that rots: the warning could be
+    /// deleted, demoted to `debug!`, or moved behind a branch nothing reaches,
+    /// and every other test here would still pass.
+    ///
+    /// The second dispatch pins the latch. An inert board with fifty cards has
+    /// one problem, not fifty, and a per-card warning is the kind of noise that
+    /// gets a useful line filtered out.
+    #[tokio::test]
+    async fn an_inert_board_says_it_cannot_dispatch_once() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        /// A writer that keeps everything the subscriber emits.
+        #[derive(Clone, Default)]
+        struct Captured(StdArc<StdMutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Keeps each event's level alongside its rendered message.
+        ///
+        /// The captured text cannot stand in for the level: `with_max_level`
+        /// names a *maximum verbosity*, so a `WARN` ceiling admits `ERROR` too,
+        /// and a promotion would slip past an assertion that only reads the
+        /// message. This reads `Metadata::level()` itself.
+        #[derive(Clone, Default)]
+        struct Levels(StdArc<StdMutex<Vec<(tracing::Level, String)>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), message.0));
+            }
+        }
+
+        let home_dir = tmp_home("oc-inert-board-");
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        // No `with_harness`: the default shape ~200 callers use.
+        let runtime = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("builds");
+        let runtime = Arc::new(runtime);
+
+        let logs = Captured::default();
+        let sink = logs.clone();
+        let levels = Levels::default();
+        let subscriber = {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing_subscriber::fmt()
+                .with_writer(move || sink.clone())
+                .with_max_level(tracing::Level::WARN)
+                .finish()
+                .with(levels.clone())
+        };
+
+        let card = |id: &str, column: &str| crate::ports::tasks::TaskRecord {
+            id: id.to_string(),
+            title: "Do the thing".to_string(),
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+            planning_attempts: Vec::new(),
+        };
+
+        // Through `upsert_task`, the real entry point: it reads the To-do →
+        // In Progress edge and calls `dispatch_task`, so this exercises the drag
+        // an operator actually performs rather than the private hop beneath it.
+        for id in ["card-1", "card-2"] {
+            runtime
+                .upsert_task(&card(id, crate::ports::tasks::COLUMN_TODO))
+                .await
+                .expect("seed the card in To-do");
+        }
+        let guard = tracing::subscriber::set_default(subscriber);
+        for id in ["card-1", "card-2"] {
+            runtime
+                .upsert_task(&card(id, crate::ports::tasks::COLUMN_IN_PROGRESS))
+                .await
+                .expect("drag it into In Progress");
+        }
+        drop(guard);
+
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).expect("utf-8");
+        assert!(
+            text.contains("no agent pool"),
+            "an inert board must say why nothing will work the card: {text:?}"
+        );
+        assert!(
+            text.contains("with_harness"),
+            "the warning must name the fix, not just the symptom: {text:?}"
+        );
+        assert_eq!(
+            text.matches("no agent pool").count(),
+            1,
+            "the warning is latched per runtime, not raised per card: {text:?}"
+        );
+
+        // The level, read from the event rather than inferred from the text.
+        // `warn!` is the whole point: demoted to `debug!` it restores the
+        // silence this fixes, and promoted to `error!` it cries failure over a
+        // documented default that ~200 callers build on purpose.
+        let seen = levels.0.lock().unwrap().clone();
+        let inert: Vec<_> = seen
+            .iter()
+            .filter(|(_, message)| message.contains("no agent pool"))
+            .collect();
+        assert_eq!(
+            inert.len(),
+            1,
+            "exactly one inert-board event should reach the subscriber: {seen:?}"
+        );
+        assert_eq!(
+            inert[0].0,
+            tracing::Level::WARN,
+            "the inert-board line must stay at WARN: {seen:?}"
+        );
+    }
+
     /// Issue #242: a run row left active by a dead host is reclaimed at the next
     /// boot, and a parked one is not.
     ///

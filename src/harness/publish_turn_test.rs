@@ -438,9 +438,6 @@ fn dispatch_run(task_id: &str, run_id: Option<&str>) -> CycleRequest {
             run_id: run_id.map(str::to_string),
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
     }
 }
 
@@ -1190,9 +1187,6 @@ fn chat(text: &str) -> CycleRequest {
             deliverable: None,
         }],
         event_seqs: Vec::new(),
-        compressed_history: Vec::new(),
-        roster: Vec::new(),
-        context_index: Vec::new(),
     }
 }
 

@@ -6,7 +6,7 @@ What a company remembers, where it lives, and the Operator's rights over it.
 
 | Kind | Written by | Retention |
 | --- | --- | --- |
-| Compressed cycle traces (~20:1 working memory) | every cycle | rolling window feeds cycles; older traces retained until evicted |
+| Compressed cycle traces | every cycle | written and exported; **not** summarized, **not** read back into a cycle, **not** evicted (issue #1175) |
 | Task results (delegated work products) | cycles | durable |
 | Context chunks (documents, research, transcripts the brain filed) | cycles, imports | durable, content-addressed |
 | Customers, engagements, decisions, outcomes | cycles (as structured task results / context) | durable |
@@ -57,11 +57,27 @@ DB-agnosticism applies to memory exactly as to every other store.
 
 ## Compounding
 
-Each cycle loads recent traces, so decisions and outcomes bias future work —
-this is the mechanism behind "memory compounds" in the
+**Intended**: each cycle loads recent traces, so decisions and outcomes bias
+future work — the mechanism behind "memory compounds" in the
 [vision](../vision/README.md). Eviction (`evict` with an `EvictionPolicy`)
 keeps the working window bounded; evicted traces are archived, not deleted,
 until retention policy or the Operator says otherwise.
+
+**Today** (issue #1175), one narrower path does the compounding and the rest is
+not wired:
+
+- Before each turn the harness retrieves the top-5 prior task outcomes matching
+  the incoming message from the `ContextStore` and injects them as text, then
+  stores the turn's outcome back (`src/harness/memory_loop.rs`). This is the
+  only live recall a company has.
+- Traces are written every cycle and read by nothing. `CycleRequest` used to
+  carry them; no `Brain` consumed the field, so it was removed rather than left
+  looking functional.
+- `evict` is implemented on every backend and called from no production path,
+  so the trace window is unbounded. `ContextStore` has no delete verb at all,
+  so the chunk store only grows — which is also why deleting an operator fact
+  leaves its `ContextStore` mirror agent-recallable
+  (`src/server/ops/memory.rs`), against the Delete right below.
 
 ## Operator rights (normative)
 

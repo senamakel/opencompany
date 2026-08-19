@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AppWindow,
+  // AppWindow,  // re-add with the Pages nav entry below
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -155,7 +155,12 @@ const NAV: NavItem[] = [
   // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
   // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
   // "something an agent built" surfaces, as opposed to the fixed views above.
-  { view: "pages", label: "Pages", icon: AppWindow },
+  // Pages is deliberately not offered in the nav. The view and its `#/pages`
+  // route stay live, so an address or an existing link still resolves — this
+  // is the same treatment `feedback`, `inbox`, `memory`, `finances`,
+  // `conversation` and `team` already get. Do not "fix" the omission by
+  // adding it back.
+  // { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 

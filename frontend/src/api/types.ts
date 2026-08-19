@@ -583,6 +583,16 @@ export interface FeedbackSummary {
  * `GET /spec` — the host's runtime specification. Unauthenticated, so the
  * console can read it before (and regardless of) a session.
  */
+/** The bound memory engine, as `/spec` reports it. No endpoint, no credential. */
+export interface MemorySpec {
+  /** `store` | `embedded` | `remote` | `null`. */
+  backend: string;
+  /** The bound engine's own name, absent when the base store serves memory. */
+  driver_id?: string;
+  /** Capability families negotiated at bind time; empty = not negotiated. */
+  capabilities: string[];
+}
+
 export interface AppSpec {
   name: string;
   version: string;
@@ -593,6 +603,13 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
+  /**
+   * The bound memory engine: mode, driver id, and the capability families it
+   * negotiated at bind time. Optional — a host predating the field omits it.
+   * The console shows this so an operator can see what a hosted engine does
+   * NOT support before a cycle discovers it.
+   */
+  memory?: MemorySpec;
   /**
    * Whether the first-run setup flow has been completed on this instance.
    *

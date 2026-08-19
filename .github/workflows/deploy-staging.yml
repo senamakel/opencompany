@@ -227,14 +227,101 @@ jobs:
                 echo "  ${ns}/${name} -> ${IMAGE}"
                 kubectl -n "${ns}" set image "statefulset/${name}" "opencompany=${IMAGE}"
               done
-            # Report where each tenant actually landed rather than assuming the
-            # patch took: a tenant scaled to zero has no pod to roll, so
-            # `rollout status` would block forever on it.
-            kubectl get statefulset -A -l app=opencompany \
-              -o 'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[?(@.name=="opencompany")].image'
           else
             echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to move them."
           fi
+
+          # Report the image a pod actually landed on rather than the desired
+          # StatefulSet template. An idle tenant deliberately has no pod, so it
+          # is reported without asking rollout status to wait forever. A tenant
+          # with replicas must either become ready or make this deploy fail.
+          echo "Tenant landed-state report (pod status, not StatefulSet spec):"
+          printf '%-24s %-24s %-8s %-90s %s\n' NS NAME STATE IMAGE DETAIL
+          tenant_failed=no
+          append_failure_detail() {
+            if [ -n "${failure_detail}" ]; then
+              failure_detail="${failure_detail}; "
+            fi
+            failure_detail="${failure_detail}$1"
+          }
+          tenant_rows=$(kubectl get statefulset -A -l app=opencompany \
+            -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.spec.replicas}{"\n"}{end}')
+          while IFS=$'\t' read -r ns name replicas; do
+            [ -n "${ns}" ] || continue
+
+            if [ "${replicas}" = "0" ]; then
+              printf '%-24s %-24s %-8s %-90s %s\n' "${ns}" "${name}" idle - 'scaled to zero'
+              continue
+            fi
+
+            rollout_error=''
+            if ! rollout_output=$(kubectl -n "${ns}" rollout status "statefulset/${name}" --timeout=180s 2>&1); then
+              rollout_error=$(printf '%s' "${rollout_output}" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+            fi
+
+            if ! pod_json=$(kubectl -n "${ns}" get pod -l app=opencompany -o json 2>&1); then
+              printf '%-24s %-24s %-8s %-90s %s\n' \
+                "${ns}" "${name}" failed - "could not read pod status: ${pod_json}"
+              tenant_failed=yes
+              continue
+            fi
+
+            pod_status=$(printf '%s' "${pod_json}" | jq -r --arg statefulset "${name}" '
+              [.items[]
+               | select(any(.metadata.ownerReferences[]?;
+                   .kind == "StatefulSet" and .name == $statefulset))]
+              | if length == 0 then
+                  "-\t-\t-\tno pod"
+                else
+                  . as $pods
+                  | [
+                      ($pods | map(.metadata.name) | join(",")),
+                      ($pods | map(.status.phase // "Unknown") | unique | join(",")),
+                      ([ $pods[] | .status.containerStatuses[]?
+                         | select(.name == "opencompany") | .image ] | unique | join(",")),
+                      ([ $pods[] | (
+                           .status.containerStatuses[]?.state.waiting.reason,
+                           .status.containerStatuses[]?.state.terminated.reason,
+                           .status.initContainerStatuses[]?.state.waiting.reason,
+                           .status.initContainerStatuses[]?.state.terminated.reason
+                         ) ]
+                       | map(select(. != null and . != "")) | unique | join(","))
+                    ] | @tsv
+                end')
+            IFS=$'\t' read -r pod_name pod_phase pod_image pod_reason <<< "${pod_status}"
+
+            failure_detail=''
+            if [ -n "${rollout_error}" ]; then
+              append_failure_detail "rollout timed out or failed: ${rollout_error}"
+            fi
+            if [ "${pod_name}" = - ]; then
+              append_failure_detail 'no pod belongs to this StatefulSet'
+            else
+              if [ "${pod_phase}" != Running ]; then
+                append_failure_detail "pod ${pod_name} phase ${pod_phase}"
+              fi
+              if [ -n "${pod_reason}" ]; then
+                append_failure_detail "pod ${pod_name}: ${pod_reason}"
+              fi
+              if [ "${REFRESH_ALL}" = true ] && [ "${pod_image}" != "${IMAGE}" ]; then
+                append_failure_detail 'pod did not land on the requested image'
+              fi
+            fi
+
+            if [ -n "${failure_detail}" ]; then
+              printf '%-24s %-24s %-8s %-90s %s\n' \
+                "${ns}" "${name}" failed "${pod_image:--}" "${failure_detail}"
+              tenant_failed=yes
+            else
+              printf '%-24s %-24s %-8s %-90s %s\n' \
+                "${ns}" "${name}" ok "${pod_image:--}" "pod ${pod_name} is Running"
+            fi
+          done <<< "${tenant_rows}"
+
+          [ "${tenant_failed}" = no ] || {
+            echo 'ERROR: one or more non-idle tenants did not land successfully.' >&2
+            exit 1
+          }
 
           kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
             -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="OCM_TENANT_IMAGE")]}OCM_TENANT_IMAGE={.value}{"\n"}{end}'

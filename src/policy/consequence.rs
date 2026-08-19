@@ -833,12 +833,87 @@ const fn d_grantable(tool: &'static str, group: EffectGroup, reach: Reach) -> De
     }
 }
 
-/// Every tool name [`DECLARED`] classifies, for the coverage test.
-pub fn declared_tools() -> impl Iterator<Item = &'static str> {
-    DECLARED
+/// One tool's argument classifier: the whole of what it needs is the call's
+/// arguments, so every entry of [`ARGUMENT_GRADED`] has this one shape.
+type Grader = fn(&serde_json::Value) -> Consequence;
+
+/// The tools whose consequence is a property of their **arguments**, not of
+/// their name — as data, so the set is enumerable rather than inferred from
+/// control flow (issue #877).
+///
+/// Issue #877 states the criterion this exists to meet: *"the coverage test
+/// keeps saying which tools answer from arguments and which from the table, so
+/// a new tool cannot quietly join the coarse side."* Before this, the four
+/// classifiers were four hand-written `if` arms in [`consequence_of`] and
+/// [`declared_tools`] chained exactly one name — `composio_execute` — by hand.
+/// A fifth classifier could therefore be added, dispatched, and still be
+/// invisible to every test that walks [`declared_tools`], because nothing tied
+/// the two together. Here they are the same list.
+///
+/// The roster is consulted **before** [`DECLARED`], so an entry that also holds
+/// a table row shadows it. That is deliberate and the table rows stay: a row is
+/// the answer for a call whose arguments cannot be read, and it keeps the tool
+/// visible to every reader who walks [`DECLARED`] looking for what a tool can
+/// reach. `composio_execute` is the one entry with no row, which is why
+/// [`declared_tools`] has to union rather than concatenate.
+///
+/// Ordered by the issue that added each, which is also the order they were
+/// dispatched in before:
+///
+/// * `composio_execute` — #441, keyed on the action slug.
+/// * `web_fetch` — #673, keyed on the URL's host.
+/// * `shell` — #875, keyed on the command line.
+/// * `git_operations` — #877, keyed on the `operation`.
+///
+/// Every name here must be **lower-case**: [`consequence_of`] matches against a
+/// lower-cased tool name, so a mixed-case entry would be an entry that never
+/// fires. `the_roster_is_lower_case_and_has_no_duplicates` holds that.
+const ARGUMENT_GRADED: &[(&str, Grader)] = &[
+    (COMPOSIO_EXECUTE, composio_execute_consequence),
+    (WEB_FETCH, web_fetch_consequence),
+    (SHELL, shell_consequence),
+    (GIT_OPERATIONS, git_operations_consequence),
+];
+
+/// The classifier that answers for `name`, or `None` when the table does.
+///
+/// `name` is expected already lower-cased, as [`consequence_of`] lower-cases
+/// once and then asks both mechanisms.
+fn argument_grader(name: &str) -> Option<Grader> {
+    ARGUMENT_GRADED
         .iter()
-        .map(|d| d.tool)
-        .chain(std::iter::once(COMPOSIO_EXECUTE))
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, grade)| *grade)
+}
+
+/// Every tool name the gate classifies, for the coverage test.
+///
+/// The union of [`DECLARED`] and [`ARGUMENT_GRADED`] — the two mechanisms
+/// together — with the roster's shadowed rows counted once. Derived rather
+/// than hand-maintained so a new argument classifier joins the coverage test by
+/// joining the roster, which is the whole of the mechanism it takes to dispatch
+/// it (issue #877).
+pub fn declared_tools() -> impl Iterator<Item = &'static str> {
+    tool_names(DECLARED, ARGUMENT_GRADED)
+}
+
+/// [`declared_tools`] over an explicit pair of tables.
+///
+/// Split out so a test can drive the derivation with a *synthetic* roster and
+/// show that an argument-graded tool with no [`DECLARED`] row is still
+/// enumerated. That is the property #877 asks for and the one the previous
+/// hand-written `chain(once(COMPOSIO_EXECUTE))` could not have: it named the
+/// single exception rather than deriving it.
+fn tool_names(
+    declared: &'static [Declared],
+    graded: &'static [(&'static str, Grader)],
+) -> impl Iterator<Item = &'static str> {
+    declared.iter().map(|d| d.tool).chain(
+        graded
+            .iter()
+            .map(|(tool, _)| *tool)
+            .filter(move |tool| !declared.iter().any(|d| d.tool == *tool)),
+    )
 }
 
 /// What this tool call can reach, and what an operator may do about it.
@@ -846,29 +921,14 @@ pub fn declared_tools() -> impl Iterator<Item = &'static str> {
 /// `args` are consulted, not decoration: `composio_execute` carries every
 /// Composio action under one name, so classifying it from the name alone
 /// collapsed a repository read and an outgoing email into the same verdict —
-/// and the cautious answer had to win for both (issue #441).
+/// and the cautious answer had to win for both (issue #441). Three more tools
+/// have since joined it, and they are listed in [`ARGUMENT_GRADED`] rather than
+/// branched on here, so that the set of them can be tested rather than read off
+/// this function's body.
 pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
     let name = tool.to_ascii_lowercase();
-    if name == COMPOSIO_EXECUTE {
-        return composio_execute_consequence(args);
-    }
-    // Issue #673: the second argument-classified tool. Its declaration below
-    // stays as the shape every reader of `DECLARED` expects — this only decides
-    // whether the operator gets a host to consent to.
-    if name == WEB_FETCH {
-        return web_fetch_consequence(args);
-    }
-    // Issue #875: the third. `shell` is the tool an agent reaches for to look
-    // at its own workspace, and classifying the NAME made a `grep` cost an
-    // operator the same interruption as `rm -rf /`.
-    if name == SHELL {
-        return shell_consequence(args);
-    }
-    // Issue #877: the fourth. `git_operations` is how an agent orients in its own
-    // workspace, and classifying the NAME charged a `git status` the same
-    // interruption as a `git push` to a configured remote.
-    if name == GIT_OPERATIONS {
-        return git_operations_consequence(args);
+    if let Some(grade) = argument_grader(&name) {
+        return grade(args);
     }
     match DECLARED.iter().find(|d| d.tool == name) {
         Some(found) => Consequence {
@@ -2838,7 +2898,125 @@ mod tests {
         let all: Vec<&str> = declared_tools().collect();
         assert!(all.contains(&COMPOSIO_EXECUTE));
         assert!(all.contains(&"shell"));
+        // `composio_execute` is the one roster entry with no `DECLARED` row;
+        // the other three shadow theirs and are counted once.
         assert_eq!(all.len(), DECLARED.len() + 1);
+    }
+
+    /// The two mechanisms **partition** the names the gate knows: every name
+    /// [`declared_tools`] yields is answered either from its arguments or from
+    /// the table, never neither and never ambiguously (issue #877).
+    ///
+    /// This is the criterion #877 states in as many words — *"the coverage test
+    /// keeps saying which tools answer from arguments and which from the
+    /// table"*. The roster is the authority on which side a tool is on, because
+    /// it is the same list [`consequence_of`] dispatches through: a tool cannot
+    /// be graded by argument without appearing here, and appearing here is what
+    /// puts it on the argument side of this assertion.
+    #[test]
+    fn the_roster_and_the_table_partition_the_known_tool_names() {
+        let known: std::collections::BTreeSet<&str> = declared_tools().collect();
+        let graded: std::collections::BTreeSet<&str> =
+            ARGUMENT_GRADED.iter().map(|(tool, _)| *tool).collect();
+        let tabled: std::collections::BTreeSet<&str> = DECLARED
+            .iter()
+            .map(|d| d.tool)
+            .filter(|tool| !graded.contains(tool))
+            .collect();
+
+        assert!(
+            graded.is_disjoint(&tabled),
+            "a name cannot be answered by both mechanisms — the roster shadows \
+             the table, so a shadowed row is not on the table side"
+        );
+        let union: std::collections::BTreeSet<&str> = graded.union(&tabled).copied().collect();
+        assert_eq!(
+            union, known,
+            "every known tool name must sit on exactly one side of the \
+             partition; if this fails, a mechanism has grown a name \
+             `declared_tools` cannot see"
+        );
+
+        // And the sides say what they are, so the failure message above is
+        // actionable rather than a set difference.
+        for tool in &graded {
+            assert!(
+                argument_grader(tool).is_some(),
+                "`{tool}` is on the roster but `consequence_of` would not \
+                 dispatch it"
+            );
+        }
+        for tool in &tabled {
+            assert!(
+                argument_grader(tool).is_none(),
+                "`{tool}` answers from the table but a classifier claims it too"
+            );
+        }
+    }
+
+    /// A classifier added to the roster is enumerated by [`declared_tools`]
+    /// **without** anyone remembering to add it there too.
+    ///
+    /// This is the regression the old shape could not guard: [`declared_tools`]
+    /// used to `chain(once(COMPOSIO_EXECUTE))`, naming the single exception by
+    /// hand, so a fifth argument-graded tool with no [`DECLARED`] row would
+    /// have been dispatched and yet invisible to every test that walks
+    /// [`declared_tools`] — #877's "quietly join the coarse side". Driving the
+    /// derivation with a synthetic roster is the only way to assert it without
+    /// shipping a fake tool.
+    #[test]
+    fn a_roster_entry_with_no_table_row_is_still_enumerated() {
+        const SYNTHETIC: &[(&str, Grader)] = &[("not_a_real_tool", shell_consequence)];
+        let names: Vec<&str> = tool_names(DECLARED, SYNTHETIC).collect();
+        assert!(
+            names.contains(&"not_a_real_tool"),
+            "a roster entry with no `DECLARED` row must still be enumerated"
+        );
+        assert_eq!(
+            names.len(),
+            DECLARED.len() + 1,
+            "and exactly once — the row-less entry is appended, nothing else moves"
+        );
+    }
+
+    /// A roster entry that shadows a [`DECLARED`] row is counted **once**.
+    ///
+    /// The union is what makes the partition above meaningful: a concatenation
+    /// would double-count `shell`, `web_fetch` and `git_operations`, and every
+    /// caller that walks [`declared_tools`] as a set — `always_approve`,
+    /// `judgement`, the harness roster — would silently do redundant work over
+    /// duplicated names.
+    #[test]
+    fn a_roster_entry_that_shadows_a_table_row_is_enumerated_once() {
+        let names: Vec<&str> = declared_tools().collect();
+        for tool in ["shell", WEB_FETCH, GIT_OPERATIONS] {
+            assert_eq!(
+                names.iter().filter(|name| **name == tool).count(),
+                1,
+                "`{tool}` holds both a roster entry and a `DECLARED` row and \
+                 must be enumerated once"
+            );
+        }
+    }
+
+    /// Every roster name is lower-case and appears once.
+    ///
+    /// [`consequence_of`] lower-cases the incoming tool name before asking
+    /// [`argument_grader`], so a mixed-case entry would be an entry that never
+    /// fires — a classifier silently replaced by its table row, which is the
+    /// fail-open shape this whole cluster of issues exists to prevent. A
+    /// duplicate name would be a second classifier the first one shadows.
+    #[test]
+    fn the_roster_is_lower_case_and_has_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (tool, _) in ARGUMENT_GRADED {
+            assert_eq!(
+                *tool,
+                tool.to_ascii_lowercase(),
+                "`{tool}` is matched against a lower-cased name and would never fire"
+            );
+            assert!(seen.insert(*tool), "`{tool}` appears twice on the roster");
+        }
     }
 
     /// The declaration is matched case-insensitively, the way every other arm
