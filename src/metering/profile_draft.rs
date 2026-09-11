@@ -47,9 +47,6 @@
 //! spent before it was called, and a full disk must not turn a suggestion the
 //! operator is about to read into a failed request.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-
 use crate::ports::types::{CompanyId, TokenUsage};
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::{CompanyStore, now_millis};
@@ -75,71 +72,25 @@ use super::inference::{UNATTRIBUTED_AGENT, inference_ledger_entry};
 /// map, so this narrows the window rather than closing it everywhere — closing
 /// it across replicas needs a reservation the *meter* can see, which is a
 /// larger change than the leak currently justifies.
-static IN_FLIGHT: LazyLock<Mutex<HashMap<CompanyId, u64>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// A promise to spend at most this many tokens, released when it is dropped.
+/// A profile draft's promise against the total ceiling.
 ///
-/// Held across the model call and dropped when the draft finishes — including
-/// on the paths that never reached a provider, because `Drop` does not care why
-/// the call ended. A leaked promise would refuse a company its own budget until
-/// the process restarted, so nothing here returns a raw number to release by
-/// hand.
-#[derive(Debug)]
-pub struct DraftBudget {
-    company: CompanyId,
-    tokens: u64,
-}
-
-impl Drop for DraftBudget {
-    fn drop(&mut self) {
-        let mut in_flight = match IN_FLIGHT.lock() {
-            Ok(guard) => guard,
-            // A poisoned map means another thread panicked mid-update. Taking
-            // the inner value is right for a counter of *in-flight* work: the
-            // alternative is to leak this reservation forever and refuse the
-            // company its budget until restart.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(total) = in_flight.get_mut(&self.company) {
-            *total = total.saturating_sub(self.tokens);
-            if *total == 0 {
-                in_flight.remove(&self.company);
-            }
-        }
-    }
-}
+/// An alias for the shared [`TokenReservation`](super::reservation::TokenReservation):
+/// a draft and an agent turn spend against the same ceiling, so both promise
+/// into one map.
+pub type DraftBudget = super::reservation::TokenReservation;
 
 /// Promises `tokens` against the ceiling, or `None` when there is no room.
 ///
-/// `spent` is what the meter reported, which counts only finished work; the
-/// promises other drafts are holding are added to it here. The check and the
-/// promise happen under one lock, which is the whole point — two callers that
-/// both read the same `spent` cannot both find room, because the first has
-/// recorded its claim before the second looks.
-///
-/// `tokens` is the field's *output ceiling*, not an estimate: reserving the
-/// most a draft could spend is what makes the promise an upper bound, so real
-/// usage can only ever come in under it.
+/// `tokens` is the field's *output ceiling*, not an estimate: reserving the most
+/// a draft could spend is what makes the promise an upper bound, so real usage
+/// can only ever come in under it.
 pub fn reserve_draft(
     company: &CompanyId,
     tokens: u64,
     spent: u64,
     plan: &super::CapabilityPlan,
 ) -> Option<DraftBudget> {
-    let mut in_flight = match IN_FLIGHT.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let promised = in_flight.get(company).copied().unwrap_or(0);
-    if plan.total_exhausted(spent.saturating_add(promised)) {
-        return None;
-    }
-    *in_flight.entry(company.clone()).or_insert(0) += tokens;
-    Some(DraftBudget {
-        company: company.clone(),
-        tokens,
-    })
+    super::reservation::reserve(company, tokens, spent, plan)
 }
 
 /// Builds the [`SampleKind::AuthoringCall`] sample for one completed draft, or

@@ -58,6 +58,32 @@ export type View =
    * setting is changed.
    */
   | "brain"
+  /**
+   * What is waiting on you, and what has happened to you — the approvals queue
+   * and the durable notification feed, as two tabs of one page.
+   *
+   * Reached from a bell in the window's title row rather than from a sidebar
+   * row. The two subjects are one question asked twice ("what needs me?"), and
+   * only one of them was ever a page: approvals were a sidebar destination, and
+   * the feed (`GET {scope}/notifications`) had no rendered surface at all — it
+   * reached a person as a channel badge and a one-shot toast, and nowhere else.
+   */
+  | "notifications"
+  /**
+   * The approvals queue's own address, kept alive rather than retired.
+   *
+   * It has no nav row any more — it is the Approvals tab of `notifications`
+   * above — but `#/approvals` and `#/approvals/<taskId>` are linked to from six
+   * places in tree (a blocked card's Review link, a chat approval row, a
+   * blocked workflow node, the Overview, the onboarding gate, and the queue's
+   * own "Show all"), plus every bookmark ever taken. `REWRITE_RETIRED` maps
+   * `[head, sub] -> [View, sub]` and has no query-string channel, so
+   * `#/approvals/<taskId>` could NOT be rewritten onto
+   * `#/notifications?tab=approvals&task=<id>` without dropping the id on the
+   * floor. The shell renders the Notifications page for this head instead, with
+   * the Approvals tab forced and the second segment forwarded — so the address
+   * keeps the whole of its meaning and nothing had to be relinked.
+   */
   | "approvals"
   | "workflows"
   | "observatory"
@@ -119,6 +145,13 @@ const ROUTABLE: Record<View, true> = {
   team: true,
   workspace: true,
   brain: true,
+  /** The tabbed page the title row's bell opens. Approvals, and the feed. */
+  notifications: true,
+  /**
+   * No nav row: the Approvals tab of `notifications`. Routable on purpose, and
+   * this entry is the load-bearing half of that — see the union above for why
+   * `#/approvals/<taskId>` could not be rewritten instead.
+   */
   approvals: true,
   workflows: true,
   /**

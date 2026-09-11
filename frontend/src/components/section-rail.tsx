@@ -352,7 +352,10 @@ function sectionRows(
   onNavigate: (view: View, sub?: string) => void,
 ): SectionRailRow[] {
   const row = (child: NavChild, active: boolean, anchor?: string): SectionRailRow => ({
-    key: `${child.view}/${child.sub ?? ""}`,
+    // The address, plus the caption's own name. Every ROW is one address, but
+    // Connections' three captions are all `connections` with no segment at all
+    // (#2259) — and two of them under one React key is one caption.
+    key: `${child.view}/${child.sub ?? ""}${child.group ? `#${child.label}` : ""}`,
     label: child.label,
     hint: child.hint,
     icon: child.icon,
@@ -368,7 +371,7 @@ function sectionRows(
       // No `data-tour` on a nested row: the anchors follow the address, and a
       // grandchild's address is its parent's view with a second segment — which
       // `childAnchor` would name after the view, colliding with the parent.
-      row(grandchild, grandchildActive(child, grandchild, view, sub)),
+      row(grandchild, grandchildActive(section, grandchild, view, sub)),
     ),
   }));
 }

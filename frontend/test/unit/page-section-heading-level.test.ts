@@ -41,12 +41,16 @@ const VIEWS = new URL("../../src/views", import.meta.url).pathname;
 const PAGES = [
   {
     view: "OAuthView",
-    sections: [
-      "connections/CompanyCredentialCard",
-      "connections/ComposioSection",
-      "connections/ProvidersSection",
-      "connections/AccountChoiceSection",
-    ],
+    sections: ["connections/ProvidersSection", "connections/AccountChoiceSection"],
+  },
+  {
+    // The credential half of the Apps page, which is a page of its own since
+    // issue #2259. Its two sections came off `OAuthView` above, and the point
+    // of pinning them here is the same one the MCP note makes below: a page's
+    // outline is exactly what a split changes, and these `h2`s now head under
+    // this page's `h1` rather than the accounts page's.
+    view: "connections/ComposioView",
+    sections: ["connections/CompanyCredentialCard", "connections/ComposioSection"],
   },
   {
     // The Connections split gave MCP and inference pages of their own, and a

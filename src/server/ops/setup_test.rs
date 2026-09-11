@@ -23,9 +23,9 @@ fn manifest() -> CompanyManifest {
     toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
 }
 
-async fn state_with(home: &std::path::Path) -> AppState {
+async fn state_with(home: &std::path::Path, company: &str) -> AppState {
     let store = FsCompanyStore::new(home.to_path_buf());
-    let id = CompanyId::new("acme");
+    let id = CompanyId::new(company);
     store
         .save(&CompanyRecord {
             overlay_retired_agents: Vec::new(),
@@ -60,15 +60,15 @@ async fn state_with(home: &std::path::Path) -> AppState {
         .unwrap();
     let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
     state.registry().insert(id, std::sync::Arc::new(runtime));
-    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    crate::server::test_support::seed_fixed_admin(&state, company).await;
     state
 }
 
-fn roster_request() -> Request<Body> {
+fn roster_request(company: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/api/v1/company/setup/roster")
-        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header("cookie", crate::server::test_support::fixed_cookie(company))
         .header("content-type", "application/json")
         .body(Body::from(
             r#"{"industry":"bakery","team_hint":"","automate":"orders"}"#,
@@ -76,24 +76,19 @@ fn roster_request() -> Request<Body> {
         .unwrap()
 }
 
-/// The route has no rate limit and no in-flight/re-entry guard (HT-124):
-/// every one of N back-to-back calls reaches `build_proposal` (a real charged
-/// model pass in production) and returns 200. A route that pays for inference
-/// per call must refuse past some per-company burst rate, not accept an
-/// unbounded rerun.
+/// A route that pays for inference per call must refuse past some
+/// per-company burst rate, not accept an unbounded rerun.
 #[tokio::test]
-#[ignore = "confirms fail-open: propose_roster has no rate limit — an \
-            authenticated operator can re-trigger the paid model pass \
-            unboundedly (HT-124), no cap enforced anywhere on this route"]
 async fn repeated_roster_proposals_are_rate_limited() {
     let home_dir = home();
-    let state = state_with(home_dir.path()).await;
+    let company = "ht124-burst";
+    let state = state_with(home_dir.path(), company).await;
     let app = router(state);
 
     const BURST: usize = 20;
     let mut statuses = Vec::with_capacity(BURST);
     for _ in 0..BURST {
-        let response = app.clone().oneshot(roster_request()).await.unwrap();
+        let response = app.clone().oneshot(roster_request(company)).await.unwrap();
         statuses.push(response.status());
     }
 
@@ -104,20 +99,31 @@ async fn repeated_roster_proposals_are_rate_limited() {
     );
 }
 
-/// Pinned as today's actual behaviour so the finding above isn't mistaken for
-/// a broken test: every call really does complete and return a real proposal.
+/// Calls inside the burst cap succeed with a real proposal; the call that
+/// would exceed it is refused with a `429` naming the cap, not silently
+/// dropped and not let through.
 #[tokio::test]
-async fn today_every_rapid_call_succeeds_uncapped() {
+async fn roster_proposals_within_the_burst_cap_succeed_then_429() {
     let home_dir = home();
-    let state = state_with(home_dir.path()).await;
+    let company = "ht124-capped";
+    let state = state_with(home_dir.path(), company).await;
     let app = router(state);
 
-    const BURST: usize = 5;
-    for _ in 0..BURST {
-        let response = app.clone().oneshot(roster_request()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    for i in 0..crate::server::ops::setup::ROSTER_PROPOSAL_BURST_LIMIT {
+        let response = app.clone().oneshot(roster_request(company)).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "call {i} inside the burst cap should succeed"
+        );
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value["agents"].is_array());
     }
+
+    let response = app.clone().oneshot(roster_request(company)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["code"], "roster_proposal_rate_limited");
 }

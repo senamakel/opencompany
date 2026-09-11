@@ -7735,6 +7735,120 @@ to = "ceo"
         assert_eq!(completed, vec!["gate", "shape"]);
     }
 
+    /// A resumed run has no [`CancellationToken`](tinyflows::engine::CancellationToken)
+    /// wired into the engine call (`resume_with_checkpointer_journaled_observed`
+    /// takes none), so `resuming` short-circuits straight to the hard-abort arm
+    /// instead of flipping a token and waiting `CANCEL_HARD_ABORT_GRACE` for a
+    /// clean node-boundary wind-down the way a fresh or checkpointed-initial run
+    /// does. This is the timing half of
+    /// `a_checkpoint_resume_can_be_hard_aborted_keeping_completed_nodes`, which
+    /// only bounds the wait at the grace window itself (5s) and so cannot tell
+    /// "aborted immediately" from "aborted right at the edge of the grace".
+    #[tokio::test]
+    async fn a_checkpoint_resume_cancel_skips_the_grace_window() {
+        const GATED_STALL: &str = r#"
+id = "gated-stall"
+name = "Gated stall"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "transform"
+name = "Gate"
+requires_approval = true
+[[node]]
+id = "shape"
+kind = "transform"
+name = "Shape"
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+prompt = "Think about it."
+[[edge]]
+from = "start"
+to = "gate"
+[[edge]]
+from = "gate"
+to = "shape"
+[[edge]]
+from = "shape"
+to = "ceo"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (mut deps, _events) = deps_with_events(dir.path());
+        deps.provider = Arc::new(StallingProvider {
+            entered: entered.clone(),
+        });
+        deps.provider_slug = "stalling".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
+        );
+        let file = parse_workflow(GATED_STALL).expect("workflow parses");
+        let checkpoints = Arc::new(
+            crate::workflows::checkpoint_store::WorkflowCheckpointStore::new(
+                dir.path().join("checkpoints"),
+            ),
+        );
+        let first_ctx = WorkflowRunContext::new(false);
+        let paused = run_workflow_lane_aware_checkpointed(
+            turn.clone(),
+            deps.clone(),
+            &rec,
+            &file,
+            Value::Null,
+            &first_ctx,
+            Some(checkpoints.clone()),
+        )
+        .await
+        .expect("initial run pauses");
+        assert_eq!(paused.pending_approvals, vec!["gate"]);
+
+        let resume_ctx = WorkflowRunContext::new(false).with_checkpoint_resume(
+            first_ctx.run_id,
+            vec!["gate".to_string()],
+            Vec::new(),
+        );
+        let cancel = resume_ctx.cancel.clone();
+        let reached_agent = entered.notified();
+        let mut resumed = Box::pin(run_workflow_lane_aware_checkpointed(
+            turn,
+            deps,
+            &rec,
+            &file,
+            Value::Null,
+            &resume_ctx,
+            Some(checkpoints),
+        ));
+        tokio::select! {
+            _ = &mut resumed => panic!("the resumed agent did not stall"),
+            () = reached_agent => {}
+        }
+
+        let pressed = std::time::Instant::now();
+        cancel.cancel();
+        let run = tokio::time::timeout(CANCEL_HARD_ABORT_GRACE, resumed)
+            .await
+            .expect("checkpoint resume did not hard abort within the grace window")
+            .expect("cancelled checkpoint resume is not a failure");
+        let elapsed = pressed.elapsed();
+
+        assert!(run.cancelled);
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE,
+            "cancelling a checkpoint resume took {elapsed:?} — at or past the grace window, \
+             meaning the resume path waited for a clean node-boundary wind-down instead of \
+             hard-aborting immediately"
+        );
+    }
+
     /// A checkpointed **initial** run (no `checkpoint_resume`) is not a resume,
     /// but production always attaches a checkpoint store — see
     /// `RuntimeBuilder`, which installs one unconditionally per company and

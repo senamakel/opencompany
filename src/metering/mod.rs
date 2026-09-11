@@ -64,6 +64,9 @@ pub mod planning;
 /// Issue #1776: what one drafted teammate mandate or persona costs, charged to
 /// the company rather than to the teammate it describes. See [`profile_draft`].
 pub mod profile_draft;
+/// Promises against the total token ceiling, held while priced work is in
+/// flight. One map for every kind of priced work — see the module docs.
+pub mod reservation;
 pub mod roster_build;
 pub mod search;
 pub mod selector;
@@ -93,6 +96,7 @@ pub use planning::{planning_sample, record_planning_usage};
 pub use profile_draft::{
     DraftBudget, profile_draft_sample, record_profile_draft_usage, reserve_draft,
 };
+pub use reservation::{TokenReservation, reserve};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };

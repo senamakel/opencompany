@@ -447,6 +447,47 @@ test("#1190 the card carries no switch; the inbox lives on the agent", async ({ 
   await expect(page.getByTestId("agent-inbox-toggle")).toBeVisible({ timeout: 30_000 });
 });
 
+test("#2252 a card opens a direct conversation with that agent", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // On the card face, visible without hovering or opening anything, and named
+  // for the agent rather than a bare "Message" repeated down the grid.
+  const message = maya.getByRole("link", { name: "Message Maya" });
+  await expect(message).toBeVisible();
+
+  // The address is the DM *channel* id (`dm:maya`), which is what the hash
+  // router resolves — not the bare host thread id. The two are the same string
+  // for an ordinary agent and differ for a teammate whose id spells General, so
+  // `test/unit/team-agent-dm-href.test.ts` pins that half; this pins that the
+  // control on the card actually lands in the room.
+  await expect(message).toHaveAttribute("href", "#/chat/dm%3Amaya");
+  await message.click();
+  await expect.poll(() => page.url()).toContain("#/chat/dm%3Amaya");
+});
+
+test("#2252 Message is on the card face only, never also in the overflow", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/company");
+
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+
+  // One affordance per action. Message moved out of this menu when it landed on
+  // the face; leaving it in both places is the regression this guards, and it
+  // is the kind that reads as harmless until an operator wonders which of the
+  // two does something different.
+  await maya.getByRole("button", { name: "Agent actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Remove" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Message" })).toHaveCount(0);
+
+  // Opening the overflow must still not trigger the title's stretched target.
+  await expect(page).toHaveURL(/#\/company$/);
+});
+
 test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await mockApi(page);
 

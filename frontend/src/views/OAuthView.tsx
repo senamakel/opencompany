@@ -2,26 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Info, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
-import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
-  CATALOG_READ_TIMEOUT_MS,
   disconnectComposioConnection,
-  getComposioStatus,
   listComposioConnections,
   startComposioAuthorize,
   type ComposioConnectedAccount,
-  type ComposioStatus,
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
-import { PageTabPanel, PageTabs, type PageTab } from "@/components/page-tabs";
-import { useHashTab } from "@/hooks/use-hash-tab";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
-import { classifyLoadFailure } from "@/lib/section-load";
 import {
   buildGridProviders,
   connectedProviderCount,
@@ -31,9 +24,8 @@ import {
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
 import { grantNamespace } from "@/components/grant-namespace";
 import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
-import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
-import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
+import { useComposioCredential } from "@/views/connections/use-composio-credential";
 
 interface Props {
   client: OpenCompanyClient;
@@ -63,36 +55,39 @@ type Load = "loading" | "ready" | "unavailable";
  * diff across the module for no surface benefit. The same split Rule 1 of
  * `docs/spec/runtime/ledgers-console-ia.md` makes for "ledger".
  *
- * Composio stays on this page. `ComposioSection` looks self-contained, but
- * `ProvidersSection` reads its `credentialSource`, `granted`, `openMode` and
- * catalog warning to decide what every provider tile renders — the credential
- * is the engine the provider list runs on, and splitting them would separate a
- * credential from what it unlocks.
- */
-/**
- * The two questions this page answers, which are not the same question.
+ * # Composio is its own page now, and that is not a reversal of the comment
+ * this replaces
  *
- * **Providers** is what the company is signed in to — the catalog, what is
- * connected, and which account teammates act as. **Credentials** is what
- * authorises all of it: the one platform key and the Composio escape hatch.
+ * What stood here said Composio could not leave: `ComposioSection` looks
+ * self-contained, but `ProvidersSection` reads the credential's
+ * `credentialSource`, `granted`, `openMode` and catalog warning to decide what
+ * every provider tile renders — the credential is the engine the provider list
+ * runs on, so splitting them would separate a credential from what it unlocks.
  *
- * They were one column, credentials on top, so the page opened on a key form
- * an operator sets once and scrolled past it every time to reach the list they
- * came for. Tabs rather than two pages because a credential exists only to
- * make a provider connectable: one subject, two views.
+ * Every word of that about the dependency is still true. What it got wrong is
+ * the conclusion: it is a **data** dependency, and it argued a **layout** one
+ * from it. What the grid needs is the credential's *state*, not the
+ * credential's *form* sitting above it in the same scroll — so the two
+ * surfaces are two pages (`#/connections/composio`, issue #2259) and the state
+ * they share lifted into `useComposioCredential`, which both of them mount and
+ * neither of them fetches for itself. Two surfaces disagreeing about whether
+ * the company has a credential is what the old comment was really guarding
+ * against (issues #582 and #586); one shared read is what prevents it, and
+ * colocation was only ever a proxy for that.
+ *
+ * The page's own tabs went with it. Providers *was* one of two tabs here —
+ * credentials on top of one column first, then a tab strip — and with the
+ * credential gone there is one question left, so the page answers it directly.
  */
-const APP_TABS = [
-  { id: "providers", label: "Providers" },
-  { id: "credentials", label: "Credentials" },
-] as const satisfies readonly PageTab<string>[];
-
-type AppTab = (typeof APP_TABS)[number]["id"];
-
 export function OAuthView({ client, company }: Props) {
-  const [tab, setTab] = useHashTab<AppTab>(
-    APP_TABS.map((t) => t.id),
-    "providers",
-  );
+  // The credential this page's tiles are rendered from, and the same read the
+  // Composio page makes. Destructured under the names the rest of this file
+  // already used, so the split is a change of *where the state lives* and not a
+  // rewrite of the 400 lines that consume it.
+  const credential = useComposioCredential(client, company);
+  const { status, attested, canManage } = credential;
+  const reachSettled = credential.settled;
+  const probeFailed = credential.failed;
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   // The Composio connection objects behind those booleans, keyed by normalized
@@ -105,45 +100,9 @@ export function OAuthView({ client, company }: Props) {
   // refresh instead of showing a snapshot of the state before the revoke.
   const [opened, setOpened] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  // Bumped when the company credential changes, to remount the sections whose
-  // reported tier is downstream of it (issue #586).
-  const [credentialGeneration, setCredentialGeneration] = useState(0);
-  // Whether this viewer may change what the company connects through (issue
-  // #403). A connection belongs to the company, so changing one is an admin's
-  // call; reading the page is everyone's.
-  //
-  // **Courtesy, not enforcement.** The host refuses every write on this page
-  // with a 403 whatever this says. All hiding the controls prevents is offering
-  // an operator a button that cannot work — which on this page would be a
-  // particularly poor greeting, since the failure arrives only after they have
-  // pasted a live credential into a form that could never submit it.
-  const [canManage, setCanManage] = useState(false);
-  // The host's Composio answer, or `null` while unknown / not reachable.
-  //
-  // The whole status, not just the routing facts it used to be narrowed to: the
-  // page's one provider grid is built from `effectiveCatalog` (issue #582), and
-  // the catalog's honesty markers (`catalogSource`, `catalogNotice`) travel with
-  // it. Narrowing here and re-fetching the same call elsewhere for the rest is
-  // how the page ended up with two lists.
-  const [status, setStatus] = useState<ComposioStatus | null>(null);
   // Slugs connected through the by-slug escape hatch this session, so they keep
   // a tile instead of vanishing after a successful sign-in (issue #397).
   const [extraToolkits, setExtraToolkits] = useState<string[]>([]);
-  // Whether this instance carries a platform-projected identity, as Composio
-  // reports it. A second witness for the same host-level fact the connection
-  // rows carry — and the only one available when the manifest declares no
-  // connections, which is exactly when the #319 guard used to go dark.
-  const [attested, setAttested] = useState(false);
-  // Whether the Composio probe has answered. The grid must not paint before it
-  // has: `refresh()` routinely resolves first, and a tile rendered on a null
-  // `reach` reads "Not available on this host" — so every tile would flash that
-  // and then flip to Connect a moment later.
-  const [reachSettled, setReachSettled] = useState(false);
-  // Whether the Composio probe could not be answered at all. Distinct from
-  // `status === null`, which is also what a genuine "no Composio surface"
-  // answer sets — collapsing the two renders "we could not check" as a
-  // confident "this host has no providers to offer yet".
-  const [probeFailed, setProbeFailed] = useState(false);
   // Poll timers for Composio sign-ins in flight, keyed by toolkit, so a company
   // switch or unmount cannot leave one running.
   const pollTimers = useRef<Record<string, number>>({});
@@ -201,58 +160,6 @@ export function OAuthView({ client, company }: Props) {
     void refresh();
   }, [refresh]);
 
-  // Composio status drives the only route this page offers (issue #822). A host
-  // without the feature, without the grant, or without a credential simply
-  // leaves `reach` null, and `connectRoute` falls back to managed/unavailable —
-  // there is no native arm to fall back to any more.
-  useEffect(() => {
-    let live = true;
-    const abort = new AbortController();
-    setReachSettled(false);
-    setProbeFailed(false);
-    void (async () => {
-      try {
-        // Bounded and cancellable through the client itself. The bound must
-        // outlast the host's own upstream-catalog budget, or a cold catalog is
-        // abandoned at exactly the moment the host is about to answer with its
-        // flagged fallback — and the grid renders "couldn't check" for a host
-        // that could have explained itself.
-        const probed = await getComposioStatus(client, company, {
-          timeoutMs: CATALOG_READ_TIMEOUT_MS,
-          signal: abort.signal,
-        });
-        if (!live) return;
-        setStatus(probed);
-        setAttested(probed?.credentialSource === "attested");
-      } catch (err) {
-        // A read this page tore down itself — a company switch, an unmount —
-        // says nothing about the host, so it must not leave a warning behind.
-        if (err instanceof Error && err.name === "AbortError") return;
-        // A 404 is the honest "no Composio surface on this host": leave the
-        // page in its no-route state. Anything else — a 5xx, an offline
-        // network, an expired session, a host that did not answer in time — is
-        // UNKNOWN, not absent, and says so.
-        if (live) {
-          setStatus(null);
-          setAttested(false);
-          if (classifyLoadFailure(err) === "error") setProbeFailed(true);
-        }
-      } finally {
-        if (live) setReachSettled(true);
-      }
-    })();
-    return () => {
-      live = false;
-      abort.abort();
-    };
-    // `credentialGeneration` is load-bearing, not decoration: this probe feeds
-    // `reach.hasCredential` and `attested`, both of which are downstream of the
-    // company credential. Setting a key flips `credentialSource` from `none` to
-    // `company`, and without a re-probe the grid would keep every tile on the
-    // "no credential" route while the Composio section right below it correctly
-    // reported the opposite (issue #586).
-  }, [client, company, credentialGeneration]);
-
   useEffect(() => {
     const timers = pollTimers.current;
     return () => {
@@ -260,22 +167,6 @@ export function OAuthView({ client, company }: Props) {
       pollTimers.current = {};
     };
   }, [company]);
-
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      let admin = false;
-      try {
-        admin = (await fetchMe(client, company)).role === "admin";
-      } catch {
-        // No user plane on this host, or not signed in — treat as non-admin.
-      }
-      if (live) setCanManage(admin);
-    })();
-    return () => {
-      live = false;
-    };
-  }, [client, company]);
 
   /**
    * The hosted route: Composio runs the OAuth on its own side, so there is no
@@ -564,15 +455,6 @@ export function OAuthView({ client, company }: Props) {
             <Badge variant="secondary">{connectedCount} connected</Badge>
           ) : null
         }
-        tabs={
-          <PageTabs
-            tabs={APP_TABS}
-            value={tab}
-            onChange={setTab}
-            idBase="apps"
-            aria-label="App views"
-          />
-        }
       />
       <div className="min-h-0 w-full flex-1 space-y-6 overflow-y-auto px-4 py-6">
         {load === "unavailable" && (
@@ -610,43 +492,6 @@ export function OAuthView({ client, company }: Props) {
           </Alert>
         )}
 
-        <PageTabPanel idBase="apps" id="credentials" value={tab} className="space-y-6">
-        {/* The general answer above the Composio-specific one: one key
-            authorizing every brokered surface, with the Composio credential as
-            the escape hatch (issue #586).
-
-            This was hidden behind `COMPOSIO_MANAGED_HIDDEN` because asking for
-            a TinyHumans key meant sending an operator to another site to mint
-            one — a worse errand than the Composio key below, for a credential
-            most people did not have. The key grant removes the errand: the card
-            now leads with one button and falls back to the field only where a
-            grant cannot complete.
-
-            It is no longer gated by a flag at all. The card asks the host and
-            renders nothing when there is no credential plane to talk to, which
-            is a truer answer than a constant — and it keeps this flag meaning
-            the one thing it says, rather than two. */}
-        <CompanyCredentialCard
-          client={client}
-          company={company}
-          canManage={canManage}
-          onChanged={() => setCredentialGeneration((n) => n + 1)}
-        />
-
-        {/* Remounted on a credential change so its status is re-read: the tier
-            it reports (`company` vs `attested` vs `none`) is downstream of the
-            key that was just set, and a stale badge would tell the operator
-            their change did not land. */}
-        <ComposioSection
-          key={credentialGeneration}
-          client={client}
-          company={company}
-          canManage={canManage}
-          onChanged={() => setCredentialGeneration((n) => n + 1)}
-        />
-        </PageTabPanel>
-
-        <PageTabPanel idBase="apps" id="providers" value={tab} className="space-y-6">
         {/* The page's one provider list (issue #582). It used to be two — this
             grid and a categorised grid of eleven hardcoded tiles below it — and
             they disagreed by construction, so a provider could show as connected
@@ -666,12 +511,14 @@ export function OAuthView({ client, company }: Props) {
             void (async () => {
               setGrantingComposio(true);
               try {
-                // Both generations bump: the grant changes what the page's
-                // status says about `granted`, and `ComposioSection` reads the
-                // same flag one card up. Refreshing one and not the other is
-                // the two-surfaces-disagreeing failure #582 is about.
+                // The shared credential is told, not just this page: the
+                // grant changes what `granted` says, and the Composio page
+                // renders from the same hook. Refreshing one view of it and
+                // not the other is the two-surfaces-disagreeing failure #582
+                // is about — which is why the state is shared rather than
+                // fetched twice.
                 if (await grantNamespace(client, company, "composio")) {
-                  setCredentialGeneration((n) => n + 1);
+                  credential.changed();
                   await refresh();
                 }
               } finally {
@@ -692,7 +539,7 @@ export function OAuthView({ client, company }: Props) {
           client={client}
           company={company}
           canManage={canManage}
-          generation={connectionsGeneration + credentialGeneration}
+          generation={connectionsGeneration + credential.generation}
         />
 
         {/* A connection as an object you open rather than a row with a button
@@ -708,7 +555,6 @@ export function OAuthView({ client, company }: Props) {
           busy={busy !== null}
           onClose={() => setOpened(null)}
         />
-        </PageTabPanel>
       </div>
     </div>
   );

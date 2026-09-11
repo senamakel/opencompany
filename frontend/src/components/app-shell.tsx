@@ -21,6 +21,7 @@ import { AgentProfileProvider } from "@/components/agent-profile-sheet";
 import { ContentSurface } from "@/components/content-surface";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import { HostSwitcher } from "@/components/host-switcher";
+import { NotificationsButton } from "@/components/notifications-button";
 import { OverviewButton } from "@/components/overview-button";
 import { TitleBarSearch } from "@/components/title-bar-search";
 import { TitleBarUtilities } from "@/components/title-bar-utilities";
@@ -90,11 +91,8 @@ import {
   threadsToReReadForMentions,
 } from "@/lib/mention-badge";
 import {
-  flushPendingAcknowledgements,
   operationalNotificationSeverity,
   operationalNotificationsToAnnounce,
-  scheduleAcknowledgement,
-  type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 import { usePresence } from "@/hooks/use-presence";
 import { useAutonomy } from "@/hooks/use-autonomy";
@@ -159,7 +157,7 @@ import {
   type HistoryStatus,
 } from "@/views/room/model";
 import { TeamView } from "@/views/TeamView";
-import { ApprovalsView } from "@/views/ApprovalsView";
+import { NotificationsView } from "@/views/NotificationsView";
 import { LedgersView, MANAGE_SEGMENT } from "@/views/LedgersView";
 import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
@@ -2144,17 +2142,25 @@ export function AppShell({
   // fails (offline) is retried by the next reload rather than hammered.
   const mentionReReadSubjectsRef = useRef<Set<string>>(new Set());
   // Ids of non-mention (`dispatch_failed` / `approval_expired` /
-  // `workflow_run_*`) rows this session has already toasted. These rows come
-  // back on every poll until marked read server-side, so this local guard is
-  // what keeps a single dispatch failure from toasting once per interval
-  // instead of once — see `@/lib/operational-notifications`.
+  // `workflow_run_*`) rows this console has already announced, or decided not
+  // to. These rows come back on every poll until somebody dismisses them, so
+  // this guard is what keeps a single dispatch failure from toasting once per
+  // interval instead of once — see `@/lib/operational-notifications`.
   const operationalAnnouncedRef = useRef<Set<string>>(new Set());
-  // Toasted operational ids waiting for the tab to become visible before the
-  // server-side ack fires (Codex #1883 P2). See
-  // `scheduleAcknowledgement`/`flushPendingAcknowledgements`.
-  const pendingAckRef = useRef<PendingAcknowledgement[]>([]);
+  // Whether the first poll of the current scope has landed. Until it has,
+  // every operational row it returns is **backlog**: it happened before this
+  // console was open, so it is seeded into the set above rather than toasted.
+  //
+  // A toast is how a failure reaches somebody who is looking at something else
+  // — it is not a summary of what was already waiting. That is the Activity
+  // tab's job, and the bell carries the count. Toasting the backlog on arrival
+  // put a full-width warning over the bottom of a 390px page on *every* load
+  // (it covered a Settings card's button in `sidebar-toggle-reachable`), and it
+  // would do that once per reload for as long as a row went undismissed.
+  const operationalSeededRef = useRef(false);
   const refreshMentions = useCallback(() => {
     const requestCompany = company;
+    const requestClient = client;
     const revision = ++mentionFeedRevision.current;
     void client
       .notifications(requestCompany)
@@ -2165,9 +2171,13 @@ export function AppShell({
       // the whole app, not just the badge. The badge is the least important
       // thing on the screen and must fail like it.
       .then((feed) => {
+        // `requestClient` as well as the company: a host switch can keep the
+        // company slug and swap only the client, and this answer came from
+        // whichever host the request was made against (CodeRabbit).
         if (
           revision !== mentionFeedRevision.current ||
-          requestCompany !== scopeRef.current.company
+          requestCompany !== scopeRef.current.company ||
+          requestClient !== scopeRef.current.client
         )
           return;
         const next = Array.isArray(feed?.notifications) ? feed.notifications : [];
@@ -2199,50 +2209,55 @@ export function AppShell({
           threadIds.forEach((threadId) => reReadSettledThread(threadId));
         }
         // `dispatch_failed` / `approval_expired` / `workflow_run_*` rows go
-        // through this same durable feed but are not mentions, so nothing
-        // above ever renders or acknowledges them — they would sit "unread"
+        // through this same durable feed but are not mentions, so none of the
+        // mention consumers above renders them — they would sit "unread"
         // forever despite coming back on every poll (Codex #1883 P1). A toast
-        // is this feed's minimal rendering. The row is marked read once the
-        // toast has actually been SEEN, not the instant it is enqueued
-        // (Codex #1883 P2 fallout): sonner still renders a toast raised in a
-        // hidden tab (only `toast-lifetime.ts`'s auto-dismiss clock pauses for
-        // one), so an immediate ack survived even a tab closed/reloaded before
-        // the operator ever returned to see it — the row reads as handled and
-        // nobody saw it, defeating the point of this consumer.
+        // is how one of them reaches somebody looking at something else.
+        //
+        // **The toast does not mark the row read.** It used to, and
+        // `@/lib/operational-notifications` said why in its own header: these
+        // rows had "no badge, no rendered item anywhere, and no path back to
+        // the server to mark them read", so acking on announcement was the only
+        // way to close the loop at all. That premise expired with the
+        // Notifications page — the Activity tab renders exactly these rows and
+        // carries Dismiss and Dismiss all, which is the path back.
+        //
+        // Acking here now defeats that surface outright. `list()` in
+        // `src/server/ops/notifications.rs` serialises unread rows only, so a
+        // row marked read the instant its toast was raised is one the Activity
+        // tab can never show: the page would be empty of precisely the events it
+        // exists to make recoverable after a toast (Codex #2256 P1).
+        //
+        // So a row stays unread until somebody dismisses it — and that makes
+        // *when* to toast a separate question from whether to keep the row.
+        //
+        // An unread row is no longer evidence that nobody has seen it; it is
+        // only evidence that nobody has dismissed it. Announcing the whole
+        // unread set on arrival therefore re-announces the backlog on every
+        // load, which is both wrong and loud: a full-width warning toast landed
+        // over the bottom of a 390px Settings page and covered the button
+        // `sidebar-toggle-reachable` hit-tests, on a row an earlier page load
+        // had already toasted.
+        //
+        // The first poll of a scope **seeds** instead of announcing. Rows that
+        // were already waiting when the console opened belong to the Activity
+        // tab and the bell's count, which is where a person goes to look; the
+        // toast is reserved for what happens while they are here, looking at
+        // something else. That is the sentence this consumer was written around
+        // and the only one a transient announcement can honestly make.
+        const seeding = !operationalSeededRef.current;
+        operationalSeededRef.current = true;
         const toAnnounce = operationalNotificationsToAnnounce(
           next,
           operationalAnnouncedRef.current,
         );
-        if (toAnnounce.length > 0) {
-          const ids = toAnnounce.map((n) => n.id);
-          // Added the instant a row is toasted, hidden tab or not — this is
-          // what stops a still-unacknowledged row from being re-toasted on
-          // the next poll, independent of when (or whether) the server-side
-          // ack below fires.
-          ids.forEach((id) => operationalAnnouncedRef.current.add(id));
+        // Marked announced either way: a seeded row must not toast on the
+        // second poll instead of the first.
+        toAnnounce.forEach((n) => operationalAnnouncedRef.current.add(n.id));
+        if (!seeding) {
           for (const n of toAnnounce) {
             if (operationalNotificationSeverity(n) === "error") toast.error(n.title);
             else toast.warning(n.title);
-          }
-          setMentionFeed((current) =>
-            current.map((n) => (ids.includes(n.id) ? { ...n, readAt: Date.now() } : n)),
-          );
-          const { ackNow, pending } = scheduleAcknowledgement(
-            ids,
-            requestCompany,
-            document.hidden,
-            pendingAckRef.current,
-          );
-          pendingAckRef.current = pending;
-          if (ackNow.length > 0) {
-            void client.markNotificationsRead(ackNow, requestCompany).catch(() => {
-              // A failed mark-read leaves the row unread server-side; the next
-              // poll re-fetches it, finds it still in `readAt: undefined`, but
-              // `operationalAnnouncedRef` has already seen its id, so it is not
-              // re-toasted. The row itself is not lost — it is still durable
-              // and still returned — only the toast is best-effort, matching
-              // how mention marking already treats offline/older-host failure.
-            });
           }
         }
       })
@@ -2256,6 +2271,12 @@ export function AppShell({
   useEffect(() => {
     mentionFeedRevision.current++;
     mentionReReadSubjectsRef.current = new Set();
+    // A new company (or a reseated client) is a new backlog: its first poll
+    // seeds rather than announcing, exactly as the first poll of the session
+    // does. Switching company must not toast everything that company has been
+    // sitting on.
+    operationalSeededRef.current = false;
+    operationalAnnouncedRef.current = new Set();
     setMentionFeed([]);
     refreshMentions();
     const onFocus = () => refreshMentions();
@@ -2268,31 +2289,61 @@ export function AppShell({
     refreshMentions();
   }, [feed.now, refreshMentions]);
 
-  // The other half of the deferred ack above: flush whatever was toasted
-  // while the tab was hidden the moment it is actually seen (Codex #1883
-  // P2). `scopeRef.current.company`, not the `company` prop, so this effect
-  // does not need to resubscribe on every company switch — it only needs the
-  // value at the instant visibility flips.
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-      const { ackNow, pending } = flushPendingAcknowledgements(
-        scopeRef.current.company,
-        pendingAckRef.current,
+  /**
+   * Mark notification rows read on behalf of the Notifications page.
+   *
+   * **`ids` absent means everything this person can see**, which is what the
+   * host does with no `ids` field and what "Dismiss all" means. An explicitly
+   * empty array marks *nothing* and is honoured as that instruction — so this
+   * never passes `[]` in place of "all", and the page never calls it with one.
+   *
+   * Optimistic, then reconciled by the next poll: the row leaves the list at
+   * the click, and a write that failed (offline, older host) brings it back
+   * rather than leaving the list permanently wrong. Exactly the shape the
+   * mention clear above already uses.
+   */
+  const markNotificationsRead = useCallback(
+    (ids?: readonly string[]): Promise<void> => {
+      const readAt = Date.now();
+      setMentionFeed((current) =>
+        current.map((n) =>
+          ids === undefined || ids.includes(n.id) ? { ...n, readAt } : n,
+        ),
       );
-      pendingAckRef.current = pending;
-      if (ackNow.length > 0) {
-        void client.markNotificationsRead(ackNow, scopeRef.current.company).catch(() => {
-          // Same best-effort contract as the immediate path above — a failed
-          // flush leaves the rows unread server-side, re-fetched (but not
-          // re-toasted, `operationalAnnouncedRef` already has their ids) on
-          // the next poll.
-        });
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [client]);
+      // Returned, not fired and forgotten: `ActivityTab` hides a row it has
+      // asked to dismiss and needs to know when that request is over, or a
+      // failed write leaves the row hidden locally and unread on the host —
+      // visible to nobody (CodeRabbit). The rejection stays swallowed here
+      // rather than being re-thrown at the caller, because the caller does not
+      // need the outcome: on success the optimistic `readAt` above already
+      // hides the row, and on failure the refresh restores it unread. Settling
+      // is the signal; which way it settled is not.
+      return client
+        .markNotificationsRead(ids ? [...ids] : undefined, company)
+        .catch(() => {
+          // Older host, or offline. The refresh below restores the true state.
+        })
+        .finally(() => {
+          // The scope this write started under may have been reseated while it
+          // was in flight — a host switch keeps `company` and swaps `client`.
+          // Refreshing on the captured callback then re-fetches on the old
+          // client and, because it bumps the feed revision on its way out,
+          // lands that answer *after* the new scope's own refresh. Same guard
+          // the read-side and reconnect paths already use above.
+          if (
+            scopeRef.current.connection === scope.connection &&
+            scopeRef.current.company === company &&
+            scopeRef.current.client === client
+          ) {
+            refreshMentions();
+          }
+        })
+        // The host's own response body is not this callback's answer — the
+        // caller only needs to know the write is over.
+        .then(() => undefined);
+    },
+    [client, company, scope.connection, refreshMentions],
+  );
 
   const mentionCounts = useMemo(() => {
     // `main` may be undefined while the desks/roster effect has not resolved —
@@ -3688,15 +3739,22 @@ export function AppShell({
             onNavigate={() => setView("overview")}
           />
         }
-        // No `approvals` slot. It is a sidebar row again — a labelled place
-        // you go, rather than one unlabelled square between an Overview glyph
-        // and an autonomy pill. The count that kept it here (issue #1018: a
-        // signal must survive the rail collapsing) is answered in the column by
-        // `SidebarMenuBadge` and its icon-rail mirror `SidebarMenuDot`, so
-        // nothing about the signal depends on this row any more. See
-        // `NAV_SECTIONS`.
-        //
-        // No `autonomy` slot either. The tier is a control on the composer's
+        approvals={
+          // The bell, beside Overview and Settings in the same group: all
+          // three are about the console rather than about the page. It is a
+          // page now rather than a bare queue — Approvals and the activity
+          // feed, as two tabs — which is what answers the objection that sent
+          // the old shield glyph back to the sidebar (one unlabelled square
+          // could not say it was a destination; a bell says exactly what this
+          // one is). The count it carries is `pending_approvals`, unchanged,
+          // and the sidebar draws no second copy of it any more.
+          <NotificationsButton
+            pending={pending}
+            active={view === "notifications" || view === "approvals"}
+            onNavigate={() => setView("notifications")}
+          />
+        }
+        // No `autonomy` slot. The tier is a control on the composer's
         // toolbar row now (`views/chat/MessageComposer.tsx`): it is a fact
         // about what happens when you press Send, so it belongs beside Send
         // rather than in the band that holds facts about the console.
@@ -3734,7 +3792,7 @@ export function AppShell({
 
         <nav aria-label="Main navigation" className="flex min-h-0 flex-1 flex-col">
           <SidebarContent data-tour="sidebar">
-          <SidebarNavigation view={view} onNavigate={setView} pending={pending} />
+          <SidebarNavigation view={view} onNavigate={setView} />
         </SidebarContent>
         {/* The console's own utilities sit at the FOOT of the column, under the
             destinations rather than over them. They act on the console, not on
@@ -4118,8 +4176,13 @@ export function AppShell({
               <MemoryView client={client} company={company} sub={sub} />
             </Suspense>
           )}
-          {view === "approvals" && (
-            <ApprovalsView
+          {/* Two heads, one page. `#/notifications` is the address and `?tab=`
+              picks the half; `#/approvals` and `#/approvals/<taskId>` still
+              answer, land on the queue and keep their second segment, because
+              `REWRITE_RETIRED` has no query channel to have carried a task id
+              across (see `lib/console-routes.ts`). */}
+          {(view === "notifications" || view === "approvals") && (
+            <NotificationsView
               client={client}
               company={company}
               feed={feed}
@@ -4127,9 +4190,20 @@ export function AppShell({
               // card, so "Review" on a blocked card lands on its approvals
               // rather than on a page the operator has to search. Same
               // unvalidated second segment every other sub-page gets — only
-              // this view knows whether the id matches anything parked, so it
+              // the queue knows whether the id matches anything parked, so it
               // does that check itself and says so when it does not.
               sub={sub}
+              forceApprovalsTab={view === "approvals"}
+              // The feed the shell already polls, not a second poller: one
+              // request, one answer, so the bell and this list cannot disagree
+              // for a poll interval. The same `Array.isArray` guard that
+              // built it applies — `mentionFeed` is never anything else.
+              notifications={mentionFeed}
+              channels={{
+                rendered: new Set(Object.values(chatChannelByThread)),
+                mainChannelId: firstDeskChannelId ?? undefined,
+              }}
+              onNotificationsRead={markNotificationsRead}
               chatChannelByThread={chatChannelByThread}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}

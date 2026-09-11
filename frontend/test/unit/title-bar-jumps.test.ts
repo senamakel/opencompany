@@ -8,10 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   APPROVALS_COUNT_CAP,
-  ApprovalsButton,
   approvalsCount,
   approvalsLabel,
-} from "@/components/approvals-button";
+  NotificationsButton,
+  notificationsLabel,
+} from "@/components/notifications-button";
 import { OverviewButton, OVERVIEW_LABEL } from "@/components/overview-button";
 
 /**
@@ -56,11 +57,11 @@ afterEach(() => {
   container.remove();
 });
 
-function renderApprovals(pending: number, extra: Record<string, unknown> = {}) {
+function renderNotifications(pending: number, extra: Record<string, unknown> = {}) {
   act(() => {
-    root.render(createElement(ApprovalsButton, { pending, onNavigate: () => {}, ...extra }));
+    root.render(createElement(NotificationsButton, { pending, onNavigate: () => {}, ...extra }));
   });
-  return container.querySelector("[data-testid=title-bar-approvals]") as HTMLElement;
+  return container.querySelector("[data-testid=title-bar-notifications]") as HTMLElement;
 }
 
 function renderOverview(extra: Record<string, unknown> = {}) {
@@ -70,45 +71,55 @@ function renderOverview(extra: Record<string, unknown> = {}) {
   return container.querySelector("[data-testid=title-bar-overview]") as HTMLElement;
 }
 
-describe("the approvals jump", () => {
-  it("names what is waiting and how many, in the sentence the rail dot carried", () => {
-    // The dot's `aria-label` was `${pending} approvals need you`. That wording
-    // is the whole of the signal for anyone who never sees the chip, so it is
-    // kept word for word rather than re-written for a new home.
-    expect(renderApprovals(19).getAttribute("aria-label")).toBe("19 approvals need you");
-    expect(renderApprovals(19).getAttribute("title")).toBe("19 approvals need you");
+describe("the notifications jump", () => {
+  it("names where it goes AND what is waiting", () => {
+    // The destination leads, because that is what the control does — a bell
+    // opens notifications whether or not anything is pending. The rail dot's
+    // sentence follows it, word for word: that wording is the whole of the
+    // signal for anyone who never sees the chip.
+    expect(renderNotifications(19).getAttribute("aria-label")).toBe(
+      "Notifications — 19 approvals need you",
+    );
+    expect(renderNotifications(19).getAttribute("title")).toBe(
+      "Notifications — 19 approvals need you",
+    );
   });
 
   it("says 'approval needs' for exactly one", () => {
     expect(approvalsLabel(1)).toBe("1 approval needs you");
-    expect(renderApprovals(1).getAttribute("aria-label")).toBe("1 approval needs you");
+    expect(renderNotifications(1).getAttribute("aria-label")).toBe(
+      "Notifications — 1 approval needs you",
+    );
   });
 
   it("is just a destination when nothing is waiting", () => {
     // "0 approvals need you" is a sentence about attention at the moment
     // nothing wants any. The glyph stays; the chip does not appear.
-    const button = renderApprovals(0);
-    expect(button.getAttribute("aria-label")).toBe("Approvals");
-    expect(button.querySelector("[data-testid=title-bar-approvals-count]")).toBeNull();
-    // Still on screen — the row's floor is approvals, autonomy and you, and an
-    // empty queue is not a reason to remove the way to reach it.
+    const button = renderNotifications(0);
+    expect(button.getAttribute("aria-label")).toBe("Notifications");
+    expect(notificationsLabel(0)).toBe("Notifications");
+    expect(button.querySelector("[data-testid=title-bar-notifications-count]")).toBeNull();
+    // Still on screen — an empty queue is not a reason to remove the way to
+    // reach the page, which carries the activity feed as well.
     expect(button).not.toBeNull();
   });
 
   it("prints the count, and caps the digits without capping the fact", () => {
     expect(
-      renderApprovals(7).querySelector("[data-testid=title-bar-approvals-count]")?.textContent,
+      renderNotifications(7).querySelector("[data-testid=title-bar-notifications-count]")?.textContent,
     ).toBe("7");
 
     const over = APPROVALS_COUNT_CAP + 1;
-    const button = renderApprovals(over);
+    const button = renderNotifications(over);
     // Three digits do not fit a mark on the corner of a 32px control.
-    expect(button.querySelector("[data-testid=title-bar-approvals-count]")?.textContent).toBe(
+    expect(button.querySelector("[data-testid=title-bar-notifications-count]")?.textContent).toBe(
       `${APPROVALS_COUNT_CAP}+`,
     );
     // But the exact number still reaches a screen reader, and still reaches a
     // test through the closed control.
-    expect(button.getAttribute("aria-label")).toBe(`${over} approvals need you`);
+    expect(button.getAttribute("aria-label")).toBe(
+      `Notifications — ${over} approvals need you`,
+    );
     expect(button.getAttribute("data-pending")).toBe(String(over));
     expect(approvalsCount(APPROVALS_COUNT_CAP)).toBe(String(APPROVALS_COUNT_CAP));
   });
@@ -116,24 +127,37 @@ describe("the approvals jump", () => {
   it("does not announce the count twice", () => {
     // The button already says "3 approvals need you". A chip that is also read
     // appends a bare "3" to that sentence.
-    const chip = renderApprovals(3).querySelector(
-      "[data-testid=title-bar-approvals-count]",
+    const chip = renderNotifications(3).querySelector(
+      "[data-testid=title-bar-notifications-count]",
     ) as HTMLElement;
     expect(chip.getAttribute("aria-hidden")).toBe("true");
   });
 
+  it("never says 'undefined approvals need you'", () => {
+    // The count is reconciled from a queue length on the way to this button
+    // (`use-company.ts`, issue #932), so a host answering that route in an
+    // unexpected shape puts `undefined` or `NaN` here despite the type. Both
+    // fail a `<= 0` test, and the label was spoken to a screen reader as
+    // "undefined approvals need you" — observed in a browser while exercising
+    // the cap against a deliberately malformed queue response.
+    const odd = [undefined, Number.NaN, null] as unknown as number[];
+    for (const value of odd) {
+      expect(notificationsLabel(value)).toBe("Notifications");
+    }
+  });
+
   it("marks itself as the page you are on, in more than a colour", () => {
-    expect(renderApprovals(0, { active: true }).getAttribute("aria-current")).toBe("page");
-    expect(renderApprovals(0).getAttribute("aria-current")).toBeNull();
+    expect(renderNotifications(0, { active: true }).getAttribute("aria-current")).toBe("page");
+    expect(renderNotifications(0).getAttribute("aria-current")).toBeNull();
   });
 
   it("navigates when pressed", () => {
     const onNavigate = vi.fn();
     act(() => {
-      root.render(createElement(ApprovalsButton, { pending: 2, onNavigate }));
+      root.render(createElement(NotificationsButton, { pending: 2, onNavigate }));
     });
     act(() => {
-      (container.querySelector("[data-testid=title-bar-approvals]") as HTMLElement).click();
+      (container.querySelector("[data-testid=title-bar-notifications]") as HTMLElement).click();
     });
     expect(onNavigate).toHaveBeenCalledTimes(1);
   });
@@ -166,13 +190,9 @@ describe("the overview jump", () => {
   });
 });
 
-describe("the sidebar carries the count again", () => {
+describe("the count is drawn once, in the title row", () => {
   const shell = readFileSync(
     resolve(process.cwd(), "src/components/app-shell.tsx"),
-    "utf8",
-  );
-  const sidebar = readFileSync(
-    resolve(process.cwd(), "src/components/ui/sidebar.tsx"),
     "utf8",
   );
   const nav = readFileSync(
@@ -180,30 +200,36 @@ describe("the sidebar carries the count again", () => {
     "utf8",
   );
 
-  it("renders the badge and the dot together, never one alone", () => {
-    // The pair is the whole point (#1018): `SidebarMenuBadge` hides itself on
-    // the icon rail, so a badge with no dot is a count that vanishes the moment
-    // the sidebar collapses — and a collapsed rail showing nothing is
-    // indistinguishable from all-clear. A dot with no badge is the mirror bug:
-    // an attention mark that never says how many.
-    expect(nav).toMatch(/<SidebarMenuBadge/);
-    expect(nav).toMatch(/<SidebarMenuDot/);
+  it("leaves no second copy in the sidebar", () => {
+    // The badge/dot pair (#1018) was two mechanisms for one number, the second
+    // of them a workaround for the first hiding itself on the 32px rail. The
+    // title row never collapses, so the disappearance cannot happen and both
+    // are deleted rather than maintained. A badge that came back here would be
+    // a count that can disagree with the bell's.
+    expect(nav).not.toMatch(/<SidebarMenuBadge/);
+    expect(nav).not.toMatch(/<SidebarMenuDot/);
+    expect(nav).not.toContain("sidebar-approvals-count");
   });
 
-  it("keeps the dot primitive and its mirror rule together", () => {
-    expect(sidebar).toMatch(/function SidebarMenuDot/);
-    // The badge hides on the rail; the dot shows only there. Neither class is
-    // decoration, and a change to one without the other reopens #1018.
-    expect(sidebar).toContain("group-data-[collapsible=icon]:hidden");
-    expect(sidebar).toContain("group-data-[collapsible=icon]:block");
+  it("takes the Approvals row out of the list of places", () => {
+    // It is the Approvals tab of the Notifications page now, and the page is
+    // chrome-reached. A row here would be a second address for one surface.
+    expect(nav).not.toMatch(/view: "approvals"/);
   });
 
-  it("feeds the sidebar the same single pending value", () => {
+  it("feeds the bell the same single pending value", () => {
     // Never re-counted. `feed.status.pending_approvals` is the one source, and
     // the contract issue #932 pins is that there is exactly one — which is why
     // it is passed through rather than derived where it is drawn.
-    expect(shell).toMatch(/<SidebarNavigation[^>]*pending=\{pending\}/);
-    // And the title row no longer carries a second copy of it.
-    expect(shell).not.toMatch(/<ApprovalsButton/);
+    expect(shell).toMatch(/<NotificationsButton[\s\S]{0,200}pending=\{pending\}/);
+    // And the sidebar is handed no copy of it to draw.
+    expect(shell).not.toMatch(/<SidebarNavigation[^>]*pending=/);
+  });
+
+  it("opens the page rather than the bare queue", () => {
+    // `#/approvals` still answers — six in-tree links and every bookmark point
+    // at it — but the control an operator presses goes to the page that holds
+    // both halves.
+    expect(shell).toMatch(/onNavigate=\{\(\) => setView\("notifications"\)\}/);
   });
 });

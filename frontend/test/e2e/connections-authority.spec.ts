@@ -54,6 +54,24 @@ async function openSettingsPage(page: Page, sub: string) {
 }
 
 /**
+ * The same, for a page under `#/connections` that no settings address rewrites
+ * onto. Composio is one since issue #2259 — it was a tab of Apps, and the
+ * `#/settings/*` rewrites predate it, so there is no legacy spelling to reuse.
+ */
+async function openConnectionsPage(page: Page, sub: string) {
+  await page.goto(`/#/connections/${sub}`);
+  if (tourDismissed.has(page)) return;
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
+    .waitFor({ state: "visible", timeout: 10_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* already seen in this context — nothing to dismiss */
+    });
+  tourDismissed.set(page, true);
+}
+
+/**
  * Invites `MEMBER_EMAIL` as a member and redeems a login code for `context`.
  *
  * Idempotent on the invite: a re-run hits `409 already a member`, which is a
@@ -102,17 +120,12 @@ test("a member sees what is connected but is offered nothing that changes it", a
     // The page says why, in the operator's language.
     await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({ timeout: 30_000 });
 
-    // No credential field anywhere on the page. This is the assertion that
-    // matters most: a member must never be handed somewhere to paste a token.
-    await expect(memberPage.locator("#composio-token")).toHaveCount(0);
-
     // Nor the controls behind the other refused writes. `exact` matters here:
     // role-name matching is substring by default, and the Settings rail carries
     // a "Who can sign in, and as what" item that a loose "Sign in" matches —
     // which would make this assertion fail for an admin too, and so prove
     // nothing about either role.
     const button = (name: string) => memberPage.getByRole("button", { name, exact: true });
-    await expect(button("Save token")).toHaveCount(0);
     await expect(button("Sign in")).toHaveCount(0);
     await expect(button("Add")).toHaveCount(0);
 
@@ -122,6 +135,23 @@ test("a member sees what is connected but is offered nothing that changes it", a
     const status = await memberPage.request.get("/api/v1/company/composio");
     expect(status.ok()).toBeTruthy();
     expect(await status.text()).not.toContain("token");
+
+    // ---- Composio: the key the whole catalog runs on -----------------------
+    //
+    // Its own page since issue #2259. The credential-field assertion below is
+    // the one that matters most in this spec — a member must never be handed
+    // somewhere to paste a token — and it lived in the Apps block above until
+    // the page split. Leaving it there would have left it passing for a reason
+    // that has nothing to do with authority: `#composio-token` is not on the
+    // Apps page for an ADMIN either now, so the assertion would have read as
+    // coverage while testing nothing. The admin half below asserts the field IS
+    // here, which is what keeps this one honest.
+    await openConnectionsPage(memberPage, "composio");
+    await expect(memberPage.getByTestId("connections-read-only")).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(memberPage.locator("#composio-token")).toHaveCount(0);
+    await expect(button("Save token")).toHaveCount(0);
 
     // ---- MCP: the tool servers, rows and the file both ---------------------
     await openSettingsPage(memberPage, "mcp");
@@ -142,7 +172,7 @@ test("a member sees what is connected but is offered nothing that changes it", a
   }
 });
 
-test("an admin is still offered every control across the three pages", async ({ page }) => {
+test("an admin is still offered every control across the four pages", async ({ page }) => {
   await openSettingsPage(page, "oauth");
   // The member's banner is absent, and the control it was refused is present.
   //
@@ -163,6 +193,13 @@ test("an admin is still offered every control across the three pages", async ({ 
   await expect(page.getByRole("button", { name: "Sign in", exact: true })).toHaveCount(1, {
     timeout: 30_000,
   });
+
+  // The credential the member above is refused, on the page it lives on. This
+  // is what stops that assertion going vacuous: if the field ever stops
+  // rendering here, this fails rather than the member case quietly passing.
+  await openConnectionsPage(page, "composio");
+  await expect(page.getByTestId("connections-read-only")).toHaveCount(0);
+  await expect(page.locator("#composio-token")).toBeVisible({ timeout: 30_000 });
 
   await openSettingsPage(page, "mcp");
   await expect(page.getByTestId("mcp-read-only")).toHaveCount(0);

@@ -375,6 +375,15 @@ describe("whether a finished wizard seeds a template or a designed company", () 
   it("seeds nothing onto a host that already has a company", () => {
     expect(shouldSeedTemplate({ ...picked, hasCompany: true })).toBe(false);
   });
+
+  it("designs instead when no template id is actually carried", () => {
+    // `source: "preset"` names the picker's answer, not proof a template id
+    // rode along with it — an empty or whitespace-only `template` has nothing
+    // for the host to seed from, so this must fall to the designed path the
+    // same as any other incomplete pick.
+    expect(shouldSeedTemplate({ ...picked, template: "" })).toBe(false);
+    expect(shouldSeedTemplate({ ...picked, template: "   " })).toBe(false);
+  });
 });
 
 describe("the sign-in modes a first run may offer", () => {

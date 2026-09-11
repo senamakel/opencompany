@@ -71,8 +71,29 @@ pub fn usd_spent_by_agent(samples: &[UsageSample], agent: &str) -> f64 {
     samples
         .iter()
         .filter(|sample| sample.agent == agent)
-        .map(|sample| sample.cost_usd)
+        .filter_map(|sample| {
+            let counted = spend_contribution(sample.cost_usd);
+            if counted.is_none() {
+                tracing::warn!(
+                    agent,
+                    cost_usd = sample.cost_usd,
+                    "[usage] a cost sample that is negative or not finite was left out of the \
+                     daily spend sum; a cap cannot be judged against it"
+                );
+            }
+            counted
+        })
         .fold(0.0, |total, cost| total + cost)
+}
+
+/// `cost` when it can be added to a spend total, `None` when it cannot.
+///
+/// A cap is a floor under how much a teammate may spend, so a sample that would
+/// lower the total (negative) or erase it (`NaN` poisons every later `+`, and an
+/// infinity saturates it) is not a cheaper turn — it is a malformed sample, and
+/// folding it in would let one bad row lift a teammate over their cap unnoticed.
+fn spend_contribution(cost: f64) -> Option<f64> {
+    (cost.is_finite() && cost >= 0.0).then_some(cost)
 }
 
 /// The epoch-millis start (`00:00Z`) of the UTC calendar day `now` falls in —
@@ -211,12 +232,10 @@ mod tests {
         assert_eq!(utc_day_start_millis(midnight), midnight);
     }
 
-    /// `usd_spent_by_agent` has no validation seam: a negative `cost_usd` folds
-    /// straight into the total instead of being rejected, so one bad sample
-    /// silently lowers a teammate's measured spend below what it actually
-    /// spent.
+    /// A negative `cost_usd` must not fold into the total: one such sample would
+    /// lower a teammate's measured spend below what they actually spent, and a
+    /// cap judged against it lets them keep spending.
     #[test]
-    #[ignore = "finding MET-001: usd_spent_by_agent has no validation seam; a negative cost_usd sample lowers measured spend instead of being rejected or clamped"]
     fn a_negative_cost_sample_does_not_lower_measured_spend() {
         let samples = vec![
             sample("analyst", 5.0, SampleKind::Inference),
@@ -229,11 +248,10 @@ mod tests {
         );
     }
 
-    /// Same seam, the non-finite case: `NaN` propagates through `+` and poisons
-    /// every later sum it touches (`x + NaN == NaN`), so one malformed sample
-    /// would erase an agent's whole daily total rather than being rejected.
+    /// The non-finite case: `NaN` propagates through `+` (`x + NaN == NaN`), so a
+    /// single malformed sample would erase the whole daily total and leave every
+    /// cap comparison false.
     #[test]
-    #[ignore = "finding MET-001: usd_spent_by_agent has no validation seam; a NaN cost_usd sample poisons the whole running total instead of being rejected or clamped"]
     fn a_non_finite_cost_sample_does_not_poison_the_total() {
         let samples = vec![
             sample("analyst", 5.0, SampleKind::Inference),

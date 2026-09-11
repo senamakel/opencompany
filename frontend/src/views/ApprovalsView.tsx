@@ -25,7 +25,6 @@ import {
   useAskerNames,
   useApprovalThreadLinks,
 } from "@/components/approval-card";
-import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApprovalDeadline } from "@/hooks/use-approval-deadline";
@@ -481,10 +480,15 @@ export function ApprovalsView({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="w-full px-4 py-6">
-        {/* The queue's own count heading below only renders once loaded, so
-            it can't be the page's one `h1` — this stays present through
-            loading, error and empty states alike (issue #1221). */}
-        <PageHeader hidden title="Approvals" />
+        {/* No `PageHeader` of its own any more. This used to draw a `hidden`
+            one titled "Approvals", because the queue's own count heading below
+            only renders once loaded and the page needed an `h1` present
+            through loading, error and empty alike (issue #1221).
+            That requirement is now met one level up and unconditionally:
+            `NotificationsView` draws the page's visible header before it mounts
+            either tab, so a second `sr-only` `h1` here would be two headings for
+            one page rather than a fallback for a missing one. This view is only
+            ever mounted inside that page — `#/approvals` renders it too. */}
         {/* Issue #883: the filter says so, and offers the way out of itself.
             A narrowed queue that looked identical to the whole one would make a
             decided-elsewhere approval look like it had vanished. */}

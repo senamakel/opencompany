@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MoreHorizontal, Network, Plus, Sparkles, UserPlus, Users } from "lucide-react";
+import {
+  MessageSquare,
+  MoreHorizontal,
+  Network,
+  Plus,
+  Sparkles,
+  UserPlus,
+  Users,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -8,7 +16,7 @@ import { ApiError, type TeamMemberDto } from "@/api/types";
 import { PageHeader } from "@/components/page-header";
 import { TeammateAvatar } from "@/components/teammate-avatar";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   DropdownMenu,
@@ -20,6 +28,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { withHostParam } from "@/hooks/use-host-route";
 import { fetchBoardColumns } from "@/lib/board-columns";
 import { shouldPromptSetup } from "@/lib/company-setup";
 import {
@@ -32,6 +42,7 @@ import { fromDto, newMember, roleSubtitle, type TeamMember } from "@/lib/team";
 import { workloadByAssignee, type Workload } from "@/lib/team-workload";
 import { usd } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { dmChannelId } from "@/views/room/channels";
 import { AgentDetailView } from "@/views/team/AgentDetailView";
 import { AddMemberDialog, type NewMemberFields } from "@/views/room/AddMemberDialog";
 
@@ -113,6 +124,21 @@ export function TeamView({
    */
   const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  /**
+   * Ids of rows this console appended itself, because the host has no team
+   * write plane (`addMember`'s 404 branch below).
+   *
+   * `fromHost` cannot answer this. It is one flag for the whole roster, set by
+   * the *read*, and a host that serves `GET …/team` and 404s the `POST` leaves
+   * it true while a console-only row sits on the grid — so both of the card's
+   * host-addressed controls would offer to open something no host holds. See
+   * {@link hostBackedCard}.
+   *
+   * Emptied by every re-read: `boot` replaces the roster wholesale, so a marker
+   * that outlived its row would suppress the controls on a real teammate who
+   * happens to be minted at the same id.
+   */
+  const [consoleOnly, setConsoleOnly] = useState<ReadonlySet<string>>(NO_CONSOLE_ONLY);
   const [nameQuery, setNameQuery] = useState("");
   const [workingOnly, setWorkingOnly] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -177,6 +203,10 @@ export function TeamView({
       setHostEmpty(false);
       return false;
     } finally {
+      // Every branch above replaced the roster from the host — with its rows,
+      // with nobody, or with nobody because the read failed. None of them can
+      // still hold a row this console appended, so the markers go with them.
+      setConsoleOnly(NO_CONSOLE_ONLY);
       setLoad("ready");
     }
   }, [client, company]);
@@ -306,7 +336,13 @@ export function TeamView({
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         // No team write plane on this host — keep the edit local-only.
-        setMembers((m) => [...m, newMember(fields)]);
+        const local = newMember(fields);
+        setMembers((m) => [...m, local]);
+        // And say so per row, because the roster-wide `fromHost` still reads
+        // true here: the read landed, only the write had nowhere to go. Without
+        // this the card would offer to open a detail page and a DM against an
+        // id the host has never heard of.
+        setConsoleOnly((ids) => new Set(ids).add(local.id));
         reportAddMember({ kind: "console-only", name: fields.name });
         setAddOpen(false);
         return true;
@@ -527,11 +563,16 @@ export function TeamView({
                   key={m.id}
                   member={m}
                   onRemove={() => void removeMember(m)}
-                  // Only a host-backed teammate can be opened: a starter-team
-                  // card is a local placeholder with no record behind it, so its
-                  // id would 404 and the detail view would report a teammate that
-                  // was never removed.
-                  onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
+                  // Only a host-backed teammate can be opened: a card with no
+                  // record behind it would 404 on its id, and the detail view
+                  // would report a teammate that was never removed.
+                  onOpen={hostBackedCard(m, fromHost, consoleOnly) ? () => onOpenAgent(m.id) : undefined}
+                  // The same gate, because it is the same question: a row no
+                  // host holds has no DM either, and the room would answer with
+                  // its unknown-channel fallback rather than a conversation.
+                  messageHref={
+                    hostBackedCard(m, fromHost, consoleOnly) ? agentDmHref(m) : undefined
+                  }
                   // Looked up by roster id, so a card the board assigned to a
                   // *desk* is never attributed to the people on it.
                   //
@@ -579,11 +620,89 @@ export function TeamView({
  */
 const IDLE: Workload = { open: 0, status: "idle" };
 
+/** No row is console-only — the state every roster read returns to. */
+const NO_CONSOLE_ONLY: ReadonlySet<string> = new Set<string>();
 
+/**
+ * Whether this card's two host-addressed controls have anything to address.
+ *
+ * Both the title's detail link and the Message link resolve an **id against the
+ * host**, so both are wrong in exactly the same states and are gated together
+ * rather than separately — one of them silently surviving a narrowing of the
+ * other is how they come to disagree.
+ *
+ * Two states, and `fromHost` alone only covers the first:
+ *
+ *  - **The roster is not the host's.** The read never landed, or landed with
+ *    nobody, so every card on screen is a local placeholder.
+ *  - **This row is not the host's**, on a roster that is. A host serving
+ *    `GET …/team` and 404ing the `POST` leaves `fromHost` true while
+ *    `addMember` appends a console-only row beside the real ones — the state
+ *    `consoleOnly` exists to name. Reaching the detail page for such a row
+ *    reports a teammate that was never removed; reaching its DM lands on the
+ *    room's unknown-channel fallback.
+ */
+export function hostBackedCard(
+  member: TeamMember,
+  fromHost: boolean,
+  consoleOnly: ReadonlySet<string>,
+): boolean {
+  return fromHost && !consoleOnly.has(member.id);
+}
+
+/**
+ * The address of this teammate's direct conversation (issue #2252).
+ *
+ * Built on {@link dmChannelId} and **not** `dmThreadId`. The two are only the
+ * same string for most of the roster: `dmChannelId` is always `dm:<id>`, the
+ * console-local channel id the hash router resolves, while `dmThreadId` is the
+ * bare id — the *host* thread a DM is addressed on — for everyone except a
+ * teammate whose id itself spells General, where the host folds the bare key
+ * onto the company-wide line. Routing on the thread id therefore sends an
+ * operator who clicked that teammate to the company's General channel instead
+ * of the DM they asked for (issue #1743).
+ *
+ * The same call, for the same reason, backs the console search results
+ * (`search/sources.ts`).
+ *
+ * ## Why it carries the host scope
+ *
+ * Through {@link withHostParam} rather than as a bare `#/chat/…` fragment,
+ * because this addresses an *anchor* — and an anchor is copied, middle-clicked
+ * and Cmd-clicked as well as clicked, which is half of why it is an anchor at
+ * all. A same-tab click survives a dropped scope, since `useHostAddress`
+ * re-asserts it on the `hashchange` that follows. A new document has no
+ * selection to repair from: `useHostRoute` falls back to the bootstrap or
+ * embedded host and resolves this agent's id against whichever console that is
+ * — an unknown DM, or a different company's agent wearing the same id.
+ * `TaskCard`'s `detailsHref` carries the scope for exactly this reason.
+ *
+ * A console holding one host writes no scope at all, so this is the same
+ * string it has always been there.
+ */
+export function agentDmHref(member: TeamMember): string {
+  return withHostParam(`chat/${encodeURIComponent(dmChannelId(member))}`);
+}
+
+/**
+ * One agent on the Agent board.
+ *
+ * The card is a scanning surface first: the title is a stretched link to the
+ * agent's detail page (issue #1810), and the two controls that sit above that
+ * click target are the ones an operator reaches for *without* leaving the grid
+ * — Message on the face (issue #2252) and the destructive Remove behind an
+ * overflow (issue #1206). Everything a card only *reports* — workload, desk,
+ * daily budget — is read-only here and configured on the detail page.
+ *
+ * `onOpen` and `messageHref` are both undefined for a card with no host record,
+ * for the same reason: a starter-team placeholder has no agent behind it, so
+ * both addresses would resolve to nothing.
+ */
 function MemberCard({
   member,
   onRemove,
   onOpen,
+  messageHref,
   workload,
   onNavigateToDesk,
 }: {
@@ -591,6 +710,12 @@ function MemberCard({
   onRemove: () => void;
   /** Open this agent's detail page. Undefined when the card has no host record. */
   onOpen?: () => void;
+  /**
+   * Address of this agent's direct conversation ({@link agentDmHref}).
+   * Undefined when the card has no host record, which is when a DM would
+   * address a thread with no agent behind it — the menu item is then omitted.
+   */
+  messageHref?: string;
   /**
    * What this teammate is on and carrying, or undefined when the board could
    * not be read — in which case the card says nothing about either.
@@ -668,8 +793,59 @@ function MemberCard({
               )}
             </div>
           )}
-          {/* Above the title button's stretched click target (issue #1810). */}
-          <div className="relative z-10">
+          {/*
+            Above the title button's stretched click target (issue #1810), and
+            holding two controls rather than one since issue #2252.
+
+            `items-center` aligns the pair to each other inside a header that is
+            `items-start`; `shrink-0` keeps them at full size so the squeeze
+            lands on the title's `min-w-0 flex-1` — which truncates — rather
+            than on the buttons, which cannot.
+          */}
+          <div className="relative z-10 flex shrink-0 items-center gap-0.5">
+            {/*
+              Message sits on the card face, not in the overflow (issue #2252).
+
+              It shipped inside the menu first. That put the thing an operator
+              wants *while scanning the roster* — ask this one something — two
+              clicks deep, behind a control whose only other item is
+              destructive. On the face it is one click and always visible: no
+              hover needed to discover it, which matters on a grid where the
+              pointer is travelling between cards rather than resting on one.
+              The menu is back to holding only Remove; two controls doing the
+              same thing would be worse than either alone.
+
+              Still an anchor, so the status bar previews the destination on
+              hover and Cmd-click opens the DM in a new tab — neither of which
+              a button can offer.
+
+              Icon-only, so the name is mandatory and carries the agent:
+              "Message Brand Designer", not a bare "Message" repeated on every
+              card, which would leave a screen reader with thirteen
+              indistinguishable controls. The label is spent twice — as the
+              tooltip and as `aria-label` — the way `McpIconButton` does it.
+            */}
+            {messageHref && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <a
+                      href={messageHref}
+                      aria-label={`Message ${member.name}`}
+                      data-testid="team-card-message"
+                      className={buttonVariants({
+                        variant: "ghost",
+                        size: "icon",
+                        className: "-mt-1 size-7",
+                      })}
+                    />
+                  }
+                >
+                  <MessageSquare className="size-4" />
+                </TooltipTrigger>
+                <TooltipContent>{`Message ${member.name}`}</TooltipContent>
+              </Tooltip>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Agent actions" />}
@@ -691,10 +867,10 @@ function MemberCard({
                   via `DailyBudgetLine` below; only the controls that write
                   moved.
 
-                  That leaves exactly one item. It stays a menu rather than a
-                  bare button: Remove is destructive, and a deliberate extra
-                  click before it is worth keeping beside the title action.
-                  Unlike "View agent" it does
+                  That still leaves exactly one item. It stays a menu rather
+                  than a bare button: Remove is destructive, and a deliberate
+                  extra click before it is worth keeping beside the title
+                  action. Unlike "View agent" it does
                   not duplicate the card's own action, and unlike Budget it is
                   not per-agent configuration that reads better on a
                   detail page — it is the one roster-level action an operator
@@ -702,6 +878,13 @@ function MemberCard({
                   prune, and moving it off the grid would trade a fast,
                   discoverable one-hop delete for an extra full-page
                   navigation with no offsetting benefit.
+
+                  Message (issue #2252) briefly sat here too, above a
+                  separator. It moved to the card face — see the anchor beside
+                  this trigger — because burying the roster's most-reached-for
+                  action behind an overflow was the thing the menu is supposed
+                  to protect against, not an instance of it. It is deliberately
+                  not in both places: one affordance per action.
                 */}
                 <DropdownMenuItem variant="destructive" onClick={onRemove}>
                   Remove

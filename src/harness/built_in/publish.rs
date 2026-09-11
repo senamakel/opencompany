@@ -112,6 +112,15 @@ pub const PUBLISH_ARTIFACT_TOOL: &str = "publish_artifact";
 /// unreachable.
 pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024;
 
+/// The largest file `capture_body` will read into memory at all, in bytes.
+///
+/// Distinct from [`MAX_ARTIFACT_BODY_BYTES`]: that cap decides text-versus-
+/// bytes classification for a file that *is* read; this one decides whether
+/// the read happens in the first place. A file over this line is refused
+/// before `std::fs::read` ever runs, so a sandbox file far past any sane size
+/// for one in-memory `Vec<u8>` cannot be buffered whole just to be classified.
+pub const MAX_CAPTURED_FILE_BYTES: usize = 20 * 1024 * 1024;
+
 /// Directory names the workspace scan never descends into.
 ///
 /// Two families, and the second one is not optional.
@@ -815,13 +824,22 @@ pub fn capture_body(
     source: &str,
     _inferred: ArtifactKind,
 ) -> std::io::Result<PublishPayload> {
-    // Route by size before reading, so the read is bounded by the prose cap: a
-    // file already past it goes straight to bytes, and a file within the cap is
-    // read whole and probed in place.
-    let over_cap = file
-        .metadata()
-        .map(|meta| meta.len() > MAX_ARTIFACT_BODY_BYTES as u64)
-        .unwrap_or(false);
+    // Stat before reading. `size` decides two separate questions from the one
+    // syscall: whether the read happens at all (the hard ceiling below) and,
+    // for a read that does happen, whether the result is prose or bytes (the
+    // prose cap). Checking `bytes.len()` after `std::fs::read` would still
+    // buffer the whole file first, which is the bug this guards against.
+    let size = file.metadata()?.len();
+    if size > MAX_CAPTURED_FILE_BYTES as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{source} is {size} bytes, over the {MAX_CAPTURED_FILE_BYTES}-byte limit for a \
+                 single publish read"
+            ),
+        ));
+    }
+    let over_cap = size > MAX_ARTIFACT_BODY_BYTES as u64;
     let bytes = std::fs::read(file)?;
     if !over_cap && std::str::from_utf8(&bytes).is_ok() {
         // The borrowed probe validates in place; the move below reuses the same

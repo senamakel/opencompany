@@ -1,13 +1,13 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type { NotificationDto } from "@/api/types";
 import {
-  flushPendingAcknowledgements,
   isOperationalNotification,
   operationalNotificationSeverity,
   operationalNotificationsToAnnounce,
-  scheduleAcknowledgement,
-  type PendingAcknowledgement,
 } from "@/lib/operational-notifications";
 
 /**
@@ -15,8 +15,19 @@ import {
  * (see `chat-mention-badge.test.ts`) all filter to `kind === "mention"` by
  * design, which left `dispatch_failed` / `approval_expired` /
  * `workflow_run_*` rows with no rendering and no acknowledgement path even
- * though `GET /notifications` returns them (Codex #1883 P1). These tests
- * pin the pure logic behind the toast-based fix.
+ * though `GET /notifications` returns them (Codex #1883 P1). These tests pin
+ * the pure logic behind the toast that announces them.
+ *
+ * The acknowledgement half of that fix is gone. `ActivityTab` renders these
+ * rows now and its Dismiss is the path back to the server, so marking a row
+ * read when its toast was raised would only hide it from the one surface
+ * built to show it — the host serialises unread rows only (Codex #2256 P1).
+ * `scheduleAcknowledgement` / `flushPendingAcknowledgements` went with it,
+ * and their tests with them.
+ *
+ * What remains is that a row is announced exactly once per session, which
+ * never depended on the ack: `operationalNotificationsToAnnounce` reads the
+ * caller's own session-local announced set and nothing else.
  */
 
 const note = (over: Partial<NotificationDto> & Pick<NotificationDto, "id" | "kind">): NotificationDto => ({
@@ -140,95 +151,71 @@ describe("operationalNotificationSeverity", () => {
   });
 });
 
-/**
- * `app-shell` toasts an operational row (sonner renders it, hidden tab or
- * not) the instant it is polled — but the previous revision of the toast+ack
- * fix marked the row read server-side at that same instant, regardless of
- * whether anyone could actually see the tab (Codex #1883 P2). A tab closed
- * or reloaded before it was ever brought to the foreground lost the
- * in-memory toast while the durable row already read as handled. These tests
- * pin the deferred-ack replacement: nothing is acknowledged while the tab is
- * hidden, and it flushes once — scoped to the right company — on return.
- */
-describe("scheduleAcknowledgement", () => {
-  it("acks immediately when the tab is visible", () => {
-    const result = scheduleAcknowledgement(["a", "b"], "acme", false, []);
-    expect(result.ackNow).toEqual(["a", "b"]);
-    expect(result.pending).toEqual([]);
+describe("announcing a row does not acknowledge it", () => {
+  // Read as source because the behaviour is a *missing* call, and a missing
+  // call is the one thing rendering cannot show you: the surface it defeats is
+  // the Activity tab, which would simply look empty — the exact reading it
+  // gives when nothing is waiting. `title-bar-jumps.test.ts` pins its own
+  // "this is gone" rules the same way.
+  const shell = readFileSync(resolve(process.cwd(), "src/components/app-shell.tsx"), "utf8");
+
+  /** The toast block, from the seed gate to the end of `refreshMentions`. */
+  const announceBlock = (() => {
+    const start = shell.indexOf("const seeding = !operationalSeededRef.current");
+    expect(start, "the announce block should still exist").toBeGreaterThan(-1);
+    const end = shell.indexOf("\n      })\n      .catch(", start);
+    expect(end, "the announce block should end inside refreshMentions").toBeGreaterThan(start);
+    return shell.slice(start, end);
+  })();
+
+  it("raises a toast and stops there", () => {
+    // The row stays unread so the Activity tab can show it. Marking it read
+    // here would remove it from a feed the host serialises unread-only, which
+    // is the whole of why that surface would be empty (Codex #2256 P1).
+    expect(announceBlock).toContain("toast.error");
+    expect(announceBlock).toContain("toast.warning");
+    expect(announceBlock).not.toContain("markNotificationsRead");
+    expect(announceBlock).not.toContain("readAt");
   });
 
-  it("parks every id instead of acking when the tab is hidden", () => {
-    const result = scheduleAcknowledgement(["a", "b"], "acme", true, []);
-    expect(result.ackNow).toEqual([]);
-    expect(result.pending).toEqual([
-      { company: "acme", id: "a" },
-      { company: "acme", id: "b" },
-    ]);
+  it("still holds the toast to one per row, which never needed the ack", () => {
+    // `operationalAnnouncedRef` is session-local and non-durable. It is what
+    // stops a poll every few seconds re-toasting the same dispatch failure,
+    // and it is updated the moment a row is announced.
+    expect(announceBlock).toContain("operationalAnnouncedRef.current.add");
   });
 
-  it("accumulates onto whatever was already parked", () => {
-    const already: PendingAcknowledgement[] = [{ company: "acme", id: "z" }];
-    const result = scheduleAcknowledgement(["a"], "acme", true, already);
-    expect(result.pending).toEqual([
-      { company: "acme", id: "z" },
-      { company: "acme", id: "a" },
-    ]);
-  });
-});
+  it("seeds the first poll of a scope instead of announcing it", () => {
+    // Without the ack, an unread row no longer means "unseen" — only
+    // "undismissed" — so announcing the whole unread set on arrival re-toasts
+    // the backlog on every load. That is not hypothetical: a warning toast
+    // landed over the bottom of a 390px Settings page and covered the button
+    // `sidebar-toggle-reachable.spec.ts` hit-tests, on a row an earlier load
+    // had already announced.
+    expect(announceBlock).toContain("const seeding = !operationalSeededRef.current");
+    // Marked announced either way, or a seeded row toasts on the second poll
+    // instead of the first — the same bug, one tick later.
+    const add = announceBlock.indexOf("operationalAnnouncedRef.current.add");
+    const gate = announceBlock.indexOf("if (!seeding)");
+    expect(add, "the announced set is updated before the toast gate").toBeLessThan(gate);
+    expect(announceBlock).toContain("toast.error");
 
-describe("flushPendingAcknowledgements", () => {
-  it("acks every id parked for the current company and clears them", () => {
-    const pending: PendingAcknowledgement[] = [
-      { company: "acme", id: "a" },
-      { company: "acme", id: "b" },
-    ];
-    const result = flushPendingAcknowledgements("acme", pending);
-    expect(result.ackNow.sort()).toEqual(["a", "b"]);
-    expect(result.pending).toEqual([]);
-  });
-
-  it("leaves a different company's parked ids untouched", () => {
-    const pending: PendingAcknowledgement[] = [
-      { company: "acme", id: "a" },
-      { company: "globex", id: "b" },
-    ];
-    const result = flushPendingAcknowledgements("acme", pending);
-    expect(result.ackNow).toEqual(["a"]);
-    expect(result.pending).toEqual([{ company: "globex", id: "b" }]);
+    // And a company switch is a new backlog: its first poll seeds too, so
+    // switching does not announce everything the next company was sitting on.
+    expect(shell).toMatch(/operationalSeededRef\.current = false/);
   });
 
-  it("is a no-op when nothing is parked", () => {
-    const result = flushPendingAcknowledgements("acme", []);
-    expect(result.ackNow).toEqual([]);
-    expect(result.pending).toEqual([]);
-  });
-});
-
-describe("the hidden-tab ack round trip does not reopen the once-per-poll bug", () => {
-  it("parks under hidden, then flushes exactly those ids once visible — never re-toasting via the announced guard", () => {
-    // Mirrors app-shell's actual sequence: toast (and mark `operationalAnnouncedRef`)
-    // fires unconditionally; only the server ack is deferred.
-    const announced = new Set<string>();
-    let pending: PendingAcknowledgement[] = [];
-
-    const rows = [note({ id: "a", kind: "dispatch_failed" })];
-    const toAnnounce = operationalNotificationsToAnnounce(rows, announced);
-    expect(toAnnounce.map((n) => n.id)).toEqual(["a"]);
-    toAnnounce.forEach((n) => announced.add(n.id)); // toasted — the guard updates regardless of visibility
-
-    const scheduled = scheduleAcknowledgement(["a"], "acme", /* documentHidden */ true, pending);
-    pending = scheduled.pending;
-    expect(scheduled.ackNow).toEqual([]); // not acked yet — tab is hidden
-
-    // A poll tick fires again before the tab is ever seen: the durable row is
-    // still unread server-side, so it comes back — but the announced guard
-    // must keep it from toasting a second time.
-    expect(operationalNotificationsToAnnounce(rows, announced)).toEqual([]);
-
-    // The tab becomes visible.
-    const flushed = flushPendingAcknowledgements("acme", pending);
-    pending = flushed.pending;
-    expect(flushed.ackNow).toEqual(["a"]);
-    expect(pending).toEqual([]);
+  it("leaves no scheduling machinery behind", () => {
+    // Dead exports outlive their callers and get called again. Both helpers
+    // and their tests went with the ack.
+    expect(shell).not.toContain("scheduleAcknowledgement");
+    expect(shell).not.toContain("flushPendingAcknowledgements");
+    expect(shell).not.toContain("pendingAckRef");
+    const lib = readFileSync(
+      resolve(process.cwd(), "src/lib/operational-notifications.ts"),
+      "utf8",
+    );
+    expect(lib).not.toMatch(/export function scheduleAcknowledgement/);
+    expect(lib).not.toMatch(/export function flushPendingAcknowledgements/);
   });
 });

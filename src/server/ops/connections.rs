@@ -547,4 +547,48 @@ mod test {
             .unwrap();
         assert!(is_blanked(&runtime, &provider).await, "secret not blanked");
     }
+
+    /// `disconnect` is declared `AdminScopedCompany` in its signature, but every
+    /// other test above calls [`do_disconnect`]/[`do_disconnect_from`] directly,
+    /// bypassing the extractor entirely. Route through the real router with a
+    /// member session so the scope is the thing under test.
+    #[tokio::test]
+    async fn disconnect_refuses_a_member_session_with_403() {
+        let (runtime, _home) = test_runtime().await;
+        let provider = unique_provider();
+        store_token(&runtime, &provider, "CANARY-member-must-not-disconnect").await;
+
+        let state = AppState::new(AppConfig::default());
+        state
+            .registry()
+            .insert(runtime.id().clone(), runtime.clone());
+        let member = crate::server::test_support::seed_session(
+            &state,
+            runtime.id().as_ref(),
+            crate::ports::users::UserRole::Member,
+        )
+        .await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/companies/{}/connections/{provider}/disconnect",
+                runtime.id().as_ref()
+            ))
+            .header("cookie", member)
+            .body(Body::empty())
+            .unwrap();
+
+        let response = crate::server::router(state).oneshot(request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a member reached an admin-scoped disconnect route"
+        );
+        assert!(
+            !is_blanked(&runtime, &provider).await,
+            "a refused member must not blank the stored credential"
+        );
+    }
 }

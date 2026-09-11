@@ -9,13 +9,18 @@ import type { ApprovalSummary, CompanyStatus } from "@/api/types";
 import { useCompany, withApprovalCount, type CompanyFeed } from "@/hooks/use-company";
 
 /**
- * The sidebar badge and the Approvals page report one number (issue #932).
+ * The title row's count and the Approvals queue report one number (#932).
+ *
+ * That count was a sidebar badge when this was written and is the Notifications
+ * bell's chip now (`notifications-button.tsx`). Which control draws it has
+ * never been what this suite is about; that there is exactly one number, read
+ * by both surfaces from `feed.status.pending_approvals`, is.
  *
  * The two counts on screen were read over two requests. The host has a single
  * source — the journal's parked set — but `GET …/{id}` answers with a *count*
  * and `GET …/{id}/approvals` answers with the *rows*, and the status handler
  * awaits a store load before it counts, so its sample is taken later than the
- * queue's. While a workflow run was parking gates, that gap was four: a badge
+ * queue's. While a workflow run was parking gates, that gap was four: a count
  * reading 18 beside a page reading "14 things need your approval".
  *
  * The reconciliation is a pure function, and most of this suite treats it as
@@ -132,7 +137,7 @@ describe("useCompany — one number for one queue (#932)", () => {
       await Promise.resolve();
     });
 
-    // The badge reads the first, the Approvals header reads the second. The
+    // The title row reads the first, the Approvals header the second. The
     // bug was that these two lines could differ.
     expect(feed().status.pending_approvals).toBe(feed().approvals.length);
     expect(feed().status.pending_approvals).toBe(14);

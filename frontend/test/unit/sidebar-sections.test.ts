@@ -39,9 +39,9 @@ function render(view: View) {
       createElement(
         SidebarProvider,
         null,
-        // Nothing waiting: this file is about which rows exist, and the
-        // approvals badge/dot pair has `title-bar-jumps.test.ts` to itself.
-        createElement(SidebarNavigation, { view, onNavigate: () => {}, pending: 0 }),
+        // No `pending` to pass: the approvals count is the title row's bell's
+        // now, and `title-bar-jumps.test.ts` owns it.
+        createElement(SidebarNavigation, { view, onNavigate: () => {} }),
       ),
     ),
   );
@@ -94,7 +94,6 @@ describe("the sidebar's section table", () => {
       "Company",
       "Connections",
       "Automations",
-      "Approvals",
     ]);
   });
 
@@ -105,16 +104,17 @@ describe("the sidebar's section table", () => {
     // whole-table equality — a commented row is not a member of it — and this
     // one says the same thing from the other side.
     //
-    // Approvals is NOT in this list any more. It went up to the title row with
-    // Overview and has come back as a row: the count that justified making it
-    // chrome (issue #1018 — a signal must survive the rail collapsing) is
-    // carried in the column by `SidebarMenuBadge` and its icon-rail mirror
-    // `SidebarMenuDot`, and what the title row could not give it is that it is
-    // a place you go rather than a glyph.
+    // Approvals is NOT in this list. It is the Approvals tab of the
+    // Notifications page now, reached from a bell in the window's title row
+    // beside Overview and Settings — so the column draws neither the row nor
+    // the `SidebarMenuBadge`/`SidebarMenuDot` pair that used to carry its
+    // count. See `components/notifications-button.tsx` for why this position
+    // settles an argument the previous two did not.
     const views = NAV_SECTIONS.map((section) => section.view as string);
     expect(views).not.toContain("overview");
     expect(views).not.toContain("observatory");
-    expect(views).toContain("approvals");
+    expect(views).not.toContain("approvals");
+    expect(views).not.toContain("notifications");
   });
 
   it("files the company's five surfaces under Company, in this order", () => {
@@ -211,8 +211,9 @@ describe("which section an address belongs to", () => {
   it("claims nothing for the surfaces that are deliberately not in the nav", () => {
     // Settings and Feedback live in the sidebar's footer; Overview in the
     // window's title row; Observatory under Settings; Pages is direct-URL only
-    // (#1171, #1172); `not-found` is nowhere by design. Approvals has a row
-    // again and is therefore owned — asserted below rather than here.
+    // (#1171, #1172); `not-found` is nowhere by design. Approvals is absent
+    // from this list only because it shares a page with `notifications`: the
+    // two heads are asserted unowned together, below, rather than here.
     for (const view of [
       "settings",
       "feedback",
@@ -225,8 +226,12 @@ describe("which section an address belongs to", () => {
     }
   });
 
-  it("owns the approvals queue, which has a row of its own again", () => {
-    expect(sectionOwning("approvals" as View)?.label).toBe("Approvals");
+  it("owns neither half of the Notifications page", () => {
+    // Both heads render the same page, and it is reached from chrome rather
+    // than from this column — so no section lights up for either. A section
+    // that claimed one would light a row an operator did not come from.
+    expect(sectionOwning("approvals" as View)).toBeUndefined();
+    expect(sectionOwning("notifications" as View)).toBeUndefined();
   });
 });
 
@@ -258,7 +263,7 @@ describe("the rendered sidebar", () => {
     // rows this column paints, whichever address is open, and a section's own
     // pages are rows on its content rail instead
     // (`section-rail-layout.test.ts`).
-    const rows = ["Room", "Company", "Connections", "Automations", "Approvals"];
+    const rows = ["Room", "Company", "Connections", "Automations"];
     for (const view of ["chat", "company", "connections", "workflows"] as View[]) {
       render(view);
       expect(fixedRows(), view).toEqual(rows);

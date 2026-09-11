@@ -150,14 +150,23 @@ export const NAMED_BY: Record<View, Names> = {
     { pageHeader: "company/ManageListsView.tsx" },
   ],
   workspace: [{ pageHeader: "WorkspaceView.tsx" }],
-  approvals: [{ pageHeader: "ApprovalsView.tsx" }],
+  /**
+   * The page the title row's bell opens. `NotificationsView` draws the header
+   * for both of its tabs, which is why `ApprovalsView.tsx` is NOT a leaf here
+   * any more: it lost its own `hidden` header when this page gained a visible
+   * one, so holding it to a heading would fail on a view that correctly has
+   * none.
+   */
+  notifications: [{ pageHeader: "NotificationsView.tsx" }],
+  /** `#/approvals` renders the same page, with the Approvals tab forced. */
+  approvals: [{ pageHeader: "NotificationsView.tsx" }],
   workflows: [{ pageHeader: "WorkflowsView.tsx" }],
   observatory: [{ pageHeader: "observatory/ObservatoryView.tsx" }],
   pages: [{ pageHeader: "PagesView.tsx" }],
   /** See `FINANCE_NAMED_BY`: `#/finances/<page>` is a three-page section. */
   finances: [{ pageHeader: "FinancesView.tsx" }],
   /**
-   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is a six-page section.
+   * See `CONNECTIONS_NAMED_BY`: `#/connections/<page>` is an eight-page section.
    * `ConnectionsSection` is the rail frame; the pages carry the headings. The
    * bare route renders Apps, so that is the leaf named here.
    */
@@ -221,12 +230,12 @@ export const SETTINGS_NAMED_BY: Record<SettingsPage, string> = {
 
 /**
  * Connections is the third section like Settings: one routed view whose `sub`
- * segment picks one of six pages, each drawing its own `PageHeader`.
+ * segment picks one of eight pages, each drawing its own `PageHeader`.
  * `#/connections/mcp` is a bookmarkable address and `mcp` is not a `View`, so
  * the routed-view sweep cannot see it — the same blind spot `#/settings/people`
  * and `#/finances/wallet` have.
  *
- * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a seventh
+ * `Record<ConnectionPage, …>` over `CONNECTION_PAGES`, so a ninth
  * connections page with no row is a compile error.
  *
  * Both files were rows in `SETTINGS_NAMED_BY` until the section was built. The
@@ -243,6 +252,11 @@ export const CONNECTIONS_NAMED_BY: Record<ConnectionPage, string> = {
   // for this rail rather than re-parented onto it.
   "api-key": "connections/ApiKeyView.tsx",
   apps: "OAuthView.tsx",
+  // The Composio credential, a tab of the Apps page until issue #2259 made it
+  // a page. `ProvidersSection` still renders from its state — through
+  // `use-composio-credential.ts`, which both pages mount — so the split is one
+  // of surfaces, not of the data.
+  composio: "connections/ComposioView.tsx",
   mcp: "McpServersView.tsx",
   // The four that followed them off the settings rail. Each view is
   // re-parented rather than rewritten, so these rows moved across from

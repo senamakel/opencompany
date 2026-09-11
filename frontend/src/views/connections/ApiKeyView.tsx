@@ -151,7 +151,7 @@ export function ApiKeyView({ client, company }: Props) {
           a routed view that titles itself is how twelve heading styles happened
           the first time, and `page-header-adoption` is the test that says so. */}
       <PageHeader
-        title="API Key"
+        title="Account"
         width="full"
         description="The TinyHumans account this company acts and spends through."
       />

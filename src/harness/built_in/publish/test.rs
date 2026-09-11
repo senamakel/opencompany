@@ -227,19 +227,11 @@ fn one_byte_over_the_cap_is_stored_as_bytes() {
     );
 }
 
-/// `capture_body` has exactly one size constant, `MAX_ARTIFACT_BODY_BYTES`
-/// (256 KiB), and it decides Text-vs-Bytes classification only — the
-/// unconditional `std::fs::read(file)?` a few lines above runs regardless of
-/// how far over that cap the file is. `one_byte_over_the_cap_is_stored_as_bytes`
-/// already pins that the whole file is read for a file just over the cap; this
-/// is the same read, at a size nothing in this module would call reasonable
-/// for a single in-memory `Vec<u8>` allocation on a chat artifact. There is no
-/// second, hard ceiling anywhere in this file — grep confirms `MAX_ARTIFACT`
-/// has exactly one match.
+/// `capture_body` stats before it reads: a file over `MAX_CAPTURED_FILE_BYTES`
+/// is refused before `std::fs::read` ever runs, so nothing this far past any
+/// sane size for a single in-memory `Vec<u8>` allocation is ever buffered
+/// whole just to be classified.
 #[test]
-#[ignore = "no hard byte ceiling exists on capture_body's Bytes path — it reads \
-            an arbitrarily large sandbox file whole via std::fs::read with no \
-            size check before the read, unlike file_read's 10MB pre-read cap"]
 fn capture_body_refuses_a_file_far_past_any_sane_single_read() {
     const UNREASONABLE_FOR_ONE_READ: usize = 64 * 1024 * 1024; // 64 MiB
     let body = vec![b'x'; UNREASONABLE_FOR_ONE_READ];

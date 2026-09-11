@@ -203,6 +203,19 @@ pub enum OpenCompanyError {
         limit: usize,
     },
 
+    /// A `POST {scope}/setup/roster` call was refused because this company
+    /// already reached its burst cap of roster-proposal calls for the
+    /// current window. Raised before any model pass runs.
+    #[error(
+        "this company already requested {limit} roster proposals in the last {window_secs}s; each call runs a paid model pass — wait before trying again"
+    )]
+    RosterProposalRateLimit {
+        /// The burst ceiling that was hit.
+        limit: usize,
+        /// The rolling window, in seconds, the ceiling applies over.
+        window_secs: u64,
+    },
+
     /// A workflow run failed after some of its nodes had already done durable
     /// work (issue #1008).
     ///
@@ -477,6 +490,7 @@ impl OpenCompanyError {
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
             Self::WorkspaceQuota(_) => "workspace_quota_exceeded".to_string(),
             Self::WorkflowRunLimit { .. } => "workflow_run_limit".to_string(),
+            Self::RosterProposalRateLimit { .. } => "roster_proposal_rate_limited".to_string(),
             // Issue #1008: delegated, not its own code. The wrapper adds a
             // payload for the journal, never a new failure a client should
             // branch on differently.

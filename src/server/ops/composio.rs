@@ -2536,6 +2536,130 @@ mod tests {
             );
             assert_eq!(out[0].default_connection_id.as_deref(), Some("c1"));
         }
+
+        /// A loopback backend for the `DELETE …/composio/connections/{id}` route
+        /// test: `conn-1` is the only account this company knows about, and the
+        /// backend's own delete either succeeds or fails depending on
+        /// `fail_delete`, so the same mock drives both the 404 and the 502 arm of
+        /// the mapping in [`super::super::disconnect_impl`].
+        async fn spawn_connections_backend(
+            fail_delete: bool,
+        ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+            use axum::extract::Path;
+            use axum::response::IntoResponse;
+
+            let deletes: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+            let recorded = deletes.clone();
+            let app = Router::new()
+                .route(
+                    "/agent-integrations/composio/connections",
+                    axum::routing::get(|| async {
+                        Json(json!({
+                            "success": true,
+                            "data": { "connections": [
+                                { "id": "conn-1", "toolkit": "gmail", "status": "ACTIVE" }
+                            ] }
+                        }))
+                    }),
+                )
+                .route(
+                    "/agent-integrations/composio/connections/{id}",
+                    axum::routing::delete(move |Path(id): Path<String>| {
+                        let recorded = recorded.clone();
+                        async move {
+                            recorded.lock().unwrap().push(id);
+                            if fail_delete {
+                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            } else {
+                                Json(json!({ "success": true, "data": { "deleted": true } }))
+                                    .into_response()
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (format!("http://{addr}"), deletes)
+        }
+
+        /// The documented split in [`super::super::disconnect_impl`]: an id this
+        /// company's own read cannot see is a `404`, never a `502`, because it is a
+        /// claim about the company's accounts rather than about the provider. Route
+        /// tests above only reach the "no client at all" `409` arm; this drives the
+        /// real mapping with a loopback backend standing in for Composio.
+        #[tokio::test]
+        async fn disconnect_maps_an_unknown_id_to_404_not_502() {
+            let (backend, deletes) = spawn_connections_backend(false).await;
+            let env = crate::test_support::EnvVarGuard::capture(&[
+                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            ]);
+            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+
+            let home_dir = home();
+            let state = state_with_manifest(home_dir.path(), GRANTED).await;
+            send(
+                &state,
+                "PUT",
+                "/api/v1/company/composio/token",
+                Some(json!({ "token": TOKEN })),
+            )
+            .await;
+
+            let (status, body, raw) = send(
+                &state,
+                "DELETE",
+                "/api/v1/company/composio/connections/conn-does-not-exist",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+            assert_eq!(body["code"], "not_found", "{body}");
+            assert!(
+                deletes.lock().unwrap().is_empty(),
+                "an id outside the company's visible connections must never reach a delete call"
+            );
+        }
+
+        /// The other arm of the same split: an id the company DOES hold, but the
+        /// backend refuses to delete, is a `502` naming the provider failure —
+        /// never a `404`, which would tell the operator to stop looking for an
+        /// account that is right there in the list.
+        #[tokio::test]
+        async fn disconnect_maps_a_backend_failure_to_502_not_404() {
+            let (backend, deletes) = spawn_connections_backend(true).await;
+            let env = crate::test_support::EnvVarGuard::capture(&[
+                crate::company::composio::COMPOSIO_BACKEND_URL_ENV,
+            ]);
+            env.set(crate::company::composio::COMPOSIO_BACKEND_URL_ENV, &backend);
+
+            let home_dir = home();
+            let state = state_with_manifest(home_dir.path(), GRANTED).await;
+            send(
+                &state,
+                "PUT",
+                "/api/v1/company/composio/token",
+                Some(json!({ "token": TOKEN })),
+            )
+            .await;
+
+            let (status, body, raw) = send(
+                &state,
+                "DELETE",
+                "/api/v1/company/composio/connections/conn-1",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{raw}");
+            assert_eq!(body["code"], "tinyhumans_composio_disconnect", "{body}");
+            assert_eq!(
+                deletes.lock().unwrap().as_slice(),
+                ["conn-1"],
+                "a known id must actually reach the backend's delete before failing"
+            );
+        }
     }
 
     /// The choice plane is wired on the same terms as the rest of the OAuth

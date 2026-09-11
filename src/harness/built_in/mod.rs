@@ -2615,6 +2615,19 @@ fn policy_ensure_lock(company: &CompanyId) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// What the total-ceiling gate decided.
+///
+/// Not a `Result`: a refusal is an ordinary outcome of asking rather than an
+/// error, and `TurnOutcome` is large enough that carrying it in an `Err` is a
+/// lint in its own right.
+enum CeilingGate {
+    /// Dispatch may proceed. The reservation — present whenever there is a
+    /// ceiling to reserve against — must be held for the turn.
+    Admitted(Option<crate::metering::TokenReservation>),
+    /// Dispatch is refused; this is the turn's outcome.
+    Refused(TurnOutcome),
+}
+
 impl HarnessPool {
     /// Builds an empty pool.
     pub fn new() -> Self {
@@ -3944,13 +3957,24 @@ impl HarnessPool {
     /// the rule: a turn that reaches nothing still spends model tokens, so a
     /// tenant past its cap must not be able to keep spending through the
     /// copilot.
+    /// How much one dispatch promises against the total ceiling before it runs.
+    ///
+    /// Not an estimate of a turn: no per-turn ceiling exists to derive one from.
+    /// It is the granularity at which the ceiling binds — overshoot is bounded
+    /// by this rather than by however many turns happened to race.
+    const DISPATCH_RESERVATION_TOKENS: u64 = 4_000;
+
     async fn total_ceiling_refusal(
         company: &CompanyId,
         agent_id: &str,
         deps: &HarnessDeps,
-    ) -> Option<TurnOutcome> {
-        let plan = deps.plan.as_ref()?;
-        plan.total_budget?;
+    ) -> CeilingGate {
+        let Some(plan) = deps.plan.as_ref() else {
+            return CeilingGate::Admitted(None);
+        };
+        if plan.total_budget.is_none() {
+            return CeilingGate::Admitted(None);
+        }
         let since = plan.period.period_start_millis(crate::ports::now_millis());
         let samples = match read_spend_for_gate(deps.meter.as_deref(), company, since).await {
             Ok(samples) => samples,
@@ -3968,7 +3992,7 @@ impl HarnessPool {
                         "[capability-budget] total-ceiling spend query failed; refusing dispatch (no model call) rather than spending against a ceiling that cannot be checked"
                     ),
                 }
-                return Some(spend_gate_refusal(
+                return CeilingGate::Refused(spend_gate_refusal(
                     unmeasurable_ceiling_notice(&fault),
                     SpendGateCause::Unmeasurable,
                 ));
@@ -4001,19 +4025,25 @@ impl HarnessPool {
                 },
             );
         }
-        if plan.total_exhausted(spent) {
-            tracing::info!(
-                company = %company,
-                agent = agent_id,
-                spent,
-                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
-            );
-            return Some(spend_gate_refusal(
-                TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
-                SpendGateCause::Exhausted,
-            ));
+        // The reservation, not the bare comparison, is what makes the ceiling
+        // bind: the meter reports only finished work, so several turns reading
+        // one `spent` would each find room and each dispatch. A promise
+        // recorded here is visible to the next caller before it looks.
+        match crate::metering::reserve(company, Self::DISPATCH_RESERVATION_TOKENS, spent, plan) {
+            Some(reservation) => CeilingGate::Admitted(Some(reservation)),
+            None => {
+                tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    spent,
+                    "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
+                );
+                CeilingGate::Refused(spend_gate_refusal(
+                    TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                    SpendGateCause::Exhausted,
+                ))
+            }
         }
-        None
     }
 
     /// Runs one **confined** turn (issue #416): an ephemeral agent with no
@@ -4044,11 +4074,11 @@ impl HarnessPool {
         chat_id: Option<&str>,
         confinement: &confine::Confinement,
     ) -> crate::Result<TurnOutcome> {
-        if let Some(refusal) =
-            Self::total_ceiling_refusal(company, confine::CONFINED_AGENT_ID, deps).await
-        {
-            return Ok(refusal);
-        }
+        let _ceiling =
+            match Self::total_ceiling_refusal(company, confine::CONFINED_AGENT_ID, deps).await {
+                CeilingGate::Admitted(reservation) => reservation,
+                CeilingGate::Refused(refusal) => return Ok(refusal),
+            };
 
         let confined = confine::build_confined_agent(company, company_name, confinement, deps)?;
         let agent = CompanyAgent {
@@ -4202,9 +4232,10 @@ impl HarnessPool {
         // observe, and the console goes on rendering that ceiling as if it
         // still applied. A refusal an operator can see and act on is a better
         // state than a cap that silently stopped existing.
-        if let Some(refusal) = Self::total_ceiling_refusal(company, agent_id, deps).await {
-            return Ok(refusal);
-        }
+        let _ceiling = match Self::total_ceiling_refusal(company, agent_id, deps).await {
+            CeilingGate::Admitted(reservation) => reservation,
+            CeilingGate::Refused(refusal) => return Ok(refusal),
+        };
 
         // Per-agent daily spend cap (issue #304): the same HARD, pre-model-call
         // refusal as the ceiling above, scoped to ONE teammate.
@@ -10882,6 +10913,97 @@ description = "Sets direction."
             search: None,
             tenant_search: None,
             workspace: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_turns_cannot_dispatch_against_the_same_total_budget() {
+        struct DelayedUsageProvider(ScriptedProvider);
+
+        #[async_trait]
+        impl ChatModel<()> for DelayedUsageProvider {
+            async fn invoke(
+                &self,
+                state: &(),
+                request: ModelRequest,
+            ) -> tinyinference::Result<ModelResponse> {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.0.invoke(state, request).await
+            }
+        }
+
+        impl HarnessModel for DelayedUsageProvider {
+            fn telemetry_provider_id(&self) -> String {
+                "budget-race".to_string()
+            }
+        }
+
+        for attempt in 0..5 {
+            let dir = tempfile::tempdir().expect("temporary workspace");
+            let meter = Arc::new(RecordingMeter::default());
+            let provider = Arc::new(DelayedUsageProvider(
+                ScriptedProvider::new(vec![Ok("completed".to_string()); 4]).reporting_usage(
+                    tinyinference::Usage {
+                        input_tokens: 60,
+                        output_tokens: 40,
+                        total_tokens: 100,
+                        ..Default::default()
+                    },
+                ),
+            ));
+            let mut deps = deps_with_plan(
+                dir.path(),
+                Arc::new(MockContext::default()),
+                Some(meter.clone()),
+                Some(crate::harness::capability_budget::CapabilityPlan {
+                    period: crate::harness::capability_budget::BudgetPeriod::Daily,
+                    budgets: std::collections::BTreeMap::new(),
+                    total_budget: Some(100),
+                }),
+            );
+            deps.provider = provider.clone();
+            let deps = Arc::new(deps);
+            let pool = Arc::new(HarnessPool::new());
+            let mut rec = record();
+            rec.id = CompanyId::new(format!("budget-race-{attempt}"));
+            pool.ensure(&rec, &deps).await.expect("roster builds");
+            let barrier = Arc::new(tokio::sync::Barrier::new(4));
+            let mut racers = tokio::task::JoinSet::new();
+            for _ in 0..4 {
+                let barrier = barrier.clone();
+                let pool = pool.clone();
+                let deps = deps.clone();
+                let company = rec.id.clone();
+                racers.spawn(async move {
+                    barrier.wait().await;
+                    pool.run(
+                        &company,
+                        "ceo",
+                        "answer once",
+                        &deps,
+                        crate::runtime::delegation::ChatTarget::default(),
+                    )
+                    .await
+                });
+            }
+            let mut completed = 0;
+            while let Some(result) = racers.join_next().await {
+                let outcome = result.expect("racer joins").expect("dispatch resolves");
+                if outcome.reply != TOTAL_BUDGET_EXHAUSTED_NOTICE {
+                    completed += 1;
+                }
+            }
+            assert_eq!(
+                provider.0.calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "attempt {attempt}: one remaining budget must admit exactly one model call"
+            );
+            assert_eq!(completed, 1, "exactly one turn completes under the ceiling");
+            assert_eq!(
+                capability_budget::tokens_in(&meter.query(&rec.id, 0).await.expect("spend")),
+                100,
+                "concurrent dispatch must not multiply the available token budget"
+            );
         }
     }
 

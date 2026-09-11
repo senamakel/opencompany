@@ -114,6 +114,9 @@ impl ApiError {
             // `provision.rs` already answers when a tenant asks for too much at
             // once — rather than a 4xx that reads as a bad request.
             OpenCompanyError::WorkflowRunLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
+            // The company is at its roster-proposal burst cap: each call runs
+            // a real, metered model pass, so this is a rate-limit refusal too.
+            OpenCompanyError::RosterProposalRateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
             // tiny.place transport: an unreachable backend degrades to 503 so
             // callers retry; any other protocol failure is an upstream 502.
             OpenCompanyError::Tinyplace { code, .. } if code == "unreachable" => {
@@ -209,6 +212,13 @@ mod test {
         let run_cap = ApiError(OpenCompanyError::WorkflowRunLimit { limit: 8 });
         assert_eq!(run_cap.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(run_cap.0.code(), "workflow_run_limit");
+
+        let roster_cap = ApiError(OpenCompanyError::RosterProposalRateLimit {
+            limit: 5,
+            window_secs: 60,
+        });
+        assert_eq!(roster_cap.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(roster_cap.0.code(), "roster_proposal_rate_limited");
 
         let other = ApiError(OpenCompanyError::Store("disk full".into()));
         assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR);

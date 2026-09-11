@@ -10,10 +10,17 @@ import { isSettingsPage } from "@/views/settings-pages";
  *
  * Retired routes have a real replacement. An address with no known route gets
  * a named explanation instead of silently looking like Overview (issue #1417).
+ *
+ * `query` is the hash's query suffix, handed in by `useHashView` rather than
+ * read off `window` here, so every branch below stays a pure function of the
+ * address it is given. Exactly one branch needs it — see `?tab=credentials` —
+ * because a retired address is almost always a retired *path*, and just once
+ * was a retired tab.
  */
 export const REWRITE_RETIRED = (
   head: string,
   sub: string | null,
+  query: URLSearchParams = new URLSearchParams(),
 ): [View, string | null] | null => {
   if (head === "tasks" && taskIdFromSegment(sub) === null) return ["ledgers", BOARD_LEDGER];
   // `#/work` is where the "Work" nav row points in shared and bookmarked links;
@@ -72,6 +79,22 @@ export const REWRITE_RETIRED = (
   // that worked.
   if (head === "connections" && sub !== null && !isConnectionPage(sub)) {
     return ["connections", null];
+  }
+  // The one retired **tab** on this rail. The Apps page answered at
+  // `#/connections/apps?tab=credentials` for as long as it had a Credentials
+  // tab, and that address was linkable on purpose (`use-hash-tab.ts` writes a
+  // real history entry so a tab can be shared). Issue #2259 split that tab out
+  // into the Composio page, and the segments alone cannot tell the retired
+  // address apart from a plain visit to Apps — `readSegments` drops the query —
+  // so without this branch the bookmark silently renders the provider grid.
+  // That is the failure the `#/settings/connections` branch above is about, one
+  // level down: a link that looks like it worked.
+  //
+  // Only `credentials`. `?tab=providers` and a bare `#/connections/apps` were
+  // always the same place and still are, so rewriting them would move an
+  // address that never broke.
+  if (head === "connections" && sub === "apps" && query.get("tab") === "credentials") {
+    return ["connections", "composio"];
   }
   if (head === "oauth") return ["connections", "apps"];
   if (head === "mcp") return ["connections", "mcp"];

@@ -1221,4 +1221,30 @@ mod tests {
         assert!(err.to_string().contains("at least 1"), "got: {err}");
         assert!(seen.is_empty(), "rejected before any request: {seen:?}");
     }
+
+    #[tokio::test]
+    async fn an_empty_or_blank_invoice_id_is_rejected_before_any_request() {
+        for id in ["", "   "] {
+            let (result, seen) = stub(vec![], |client| async move {
+                get_invoice(
+                    &client,
+                    GetInvoiceArgs {
+                        invoice_id: id.to_string(),
+                    },
+                )
+                .await
+            })
+            .await;
+
+            let err = result.expect_err("a blank invoice_id must be refused locally");
+            assert!(
+                err.to_string().contains("invoice_id"),
+                "got: {err} for input {id:?}"
+            );
+            assert!(
+                seen.is_empty(),
+                "rejected before any request: {seen:?} for input {id:?}"
+            );
+        }
+    }
 }

@@ -14,22 +14,53 @@ import { WEEK1_NUDGE_KIND } from "@/lib/week1-nudge";
  * start badging as a summons). That is correct for those three, but it left
  * these rows with nothing: no badge, no rendered item anywhere, and no path
  * back to the server to mark them read, so they sat unread forever despite
- * being returned on every poll (Codex #1883 P1). This module is the minimal
- * surface that closes the loop — a one-shot toast per row, immediately
- * eligible to be marked read the same way a viewed mention is.
+ * being returned on every poll (Codex #1883 P1). This module is the one-shot
+ * toast that announces them.
+ *
+ * # It announces; it no longer acknowledges
+ *
+ * It used to do both — toast a row and then mark it read, scheduled around
+ * tab visibility so an unseen toast did not ack (Codex #1883 P2). That second
+ * job existed only because of the sentence above: with no rendered item
+ * anywhere, an ack on announcement was the *only* way to stop a row coming
+ * back on every poll forever.
+ *
+ * The Notifications page ended that. `ActivityTab` renders exactly these rows
+ * and carries Dismiss and Dismiss all, so there is a path back to the server
+ * that a person actually drives. Keeping the ack alongside it would have made
+ * the new surface useless for precisely the rows it was built for: the host
+ * serialises unread rows only (`src/server/ops/notifications.rs`), so a row
+ * acked when its toast was raised can never appear in the list (Codex #2256
+ * P1). The scheduling helpers went with it.
+ *
+ * The caller's own `operationalAnnouncedRef` — a session-local set, never
+ * durable — is still what holds the toast to one per row rather than one per
+ * poll, and it never depended on the ack.
+ *
+ * # What the caller does with the first poll
+ *
+ * Dropping the ack changes what an unread row *means*. It used to mean "nobody
+ * has seen this"; it now means "nobody has dismissed this", and those differ
+ * across a page load. So `app-shell` seeds this set from its first poll of a
+ * scope without toasting: rows already waiting when the console opened are
+ * backlog, and belong to the Activity tab and the bell's count rather than to a
+ * transient announcement. The toast is for what happens while somebody is here,
+ * looking at something else — which is the only claim it can honestly make.
+ *
+ * That rule lives in the caller because this module sees one poll at a time and
+ * cannot tell the first from the fiftieth.
  *
  * [`WEEK1_NUDGE_KIND`] is excluded even though it is, mechanically, just
  * another non-mention row on this same feed (PR #1878 review, comment
  * 3893066248). `notifications()` on the host has no server-side kind
  * allowlist — every caller gets every unread row and filters client-side,
  * which is exactly the design this module itself relies on. That means an
- * unfiltered poll here would classify a week-1 nudge as operational too:
- * toast it as a generic warning, then mark it read the instant the tab is
- * visible (`scheduleAcknowledgement` below), before
- * `pickActiveNudge`/`WorkflowsView` ever gets a chance to show its own
- * purpose-built banner. The nudge has its own dedicated UI and its own
- * dismiss path (`week1-nudge-banner.tsx`); this module's job is the rows
- * that have no other consumer, and the nudge is not one of them.
+ * unfiltered poll here would classify a week-1 nudge as operational too and
+ * toast it as a generic warning, ahead of the purpose-built banner
+ * `pickActiveNudge`/`WorkflowsView` draws for it. The nudge has its own
+ * dedicated UI and its own dismiss path (`week1-nudge-banner.tsx`); this
+ * module's job is the rows that have no other consumer, and the nudge is not
+ * one of them.
  */
 export function isOperationalNotification(notification: NotificationDto): boolean {
   return notification.kind !== "mention" && notification.kind !== WEEK1_NUDGE_KIND;
@@ -70,77 +101,4 @@ export function operationalNotificationSeverity(
     return "error";
   }
   return "warning";
-}
-
-/** One toasted id still waiting for the tab to become visible before it can be marked read. */
-export interface PendingAcknowledgement {
-  company: string | null;
-  id: string;
-}
-
-/**
- * Decide which just-toasted ids may be marked read on the server right now,
- * versus which must wait (Codex #1883 P2, the toast+ack fix's own fallout).
- *
- * `app-shell` calls `toast.error`/`toast.warning` the instant a row is
- * announced, whether or not the tab is visible — sonner still enqueues and
- * renders it, it is only `toast-lifetime.ts`'s auto-dismiss clock that pauses
- * for a hidden tab (`sweepToasts`'s `env.documentHidden` guard), specifically
- * so the operator gets the toast's full life once they return. But the
- * previous revision of this fix marked the row read at that same enqueue
- * instant, not at the moment a person actually saw it. If the tab is closed
- * or reloaded before it is ever brought to the foreground, sonner's
- * in-memory toast — and the operator's only chance to see it — is gone, while
- * the durable row is already `readAt`-stamped server-side. A `dispatch_failed`
- * nobody ever laid eyes on reads as handled, which defeats the point of the
- * toast consumer this whole fix exists for.
- *
- * While the tab is hidden, every id is parked in `pending` instead of
- * acknowledged — see [`flushPendingAcknowledgements`] for when it finally is.
- * This does NOT reopen the "toasts once per poll interval instead of once"
- * bug the toast+ack fix closed: the caller's `operationalAnnouncedRef` guard
- * (a separate, non-durable set) is updated the moment a row is toasted,
- * hidden tab or not, so a still-unacknowledged row is never re-toasted on the
- * next poll — it is only left unacknowledged *server-side* until the tab is
- * actually seen.
- */
-export function scheduleAcknowledgement(
-  ids: readonly string[],
-  company: string | null,
-  documentHidden: boolean,
-  pending: readonly PendingAcknowledgement[],
-): { ackNow: string[]; pending: PendingAcknowledgement[] } {
-  if (!documentHidden) {
-    return { ackNow: [...ids], pending: [...pending] };
-  }
-  return {
-    ackNow: [],
-    pending: [...pending, ...ids.map((id) => ({ company, id }))],
-  };
-}
-
-/**
- * Flush every id parked by [`scheduleAcknowledgement`] for `company`, called
- * on the hidden → visible transition — the moment the operator can actually
- * see whatever sonner already rendered while the tab sat in the background.
- *
- * Scoped to `company` rather than flushing everything parked: the tab could
- * in principle switch companies while hidden, and acknowledging an id under
- * the wrong company's scope would mark a stranger's row read (or 404/silently
- * no-op against a company that never held it). An id parked under a company
- * this tab has since left stays parked — there is no visibility edge for a
- * company nobody is looking at either, so nothing is lost, only deferred
- * again until that company (if ever) becomes current.
- */
-export function flushPendingAcknowledgements(
-  company: string | null,
-  pending: readonly PendingAcknowledgement[],
-): { ackNow: string[]; pending: PendingAcknowledgement[] } {
-  const ackNow: string[] = [];
-  const stillPending: PendingAcknowledgement[] = [];
-  for (const p of pending) {
-    if (p.company === company) ackNow.push(p.id);
-    else stillPending.push(p);
-  }
-  return { ackNow, pending: stillPending };
 }

@@ -245,6 +245,33 @@ describe("resolving an address", () => {
     expect(window.location.hash).toBe("#/connections");
   });
 
+  // The one retired address on this rail that differs from a live one by its
+  // QUERY rather than its path (issue #2259, Codex review on PR #2263). Apps
+  // carried a linkable Credentials tab until Composio became a page of its own;
+  // `readSegments` drops the query, so `#/connections/apps?tab=credentials` and
+  // a plain visit to Apps are the same two segments. Without the rewrite the
+  // bookmark renders the provider grid — a link that looks like it worked,
+  // which is the failure `#/settings/connections` above exists to prevent.
+  it("rewrites the retired Credentials tab onto the Composio page", async () => {
+    rewrite = REWRITE_RETIRED;
+    await visit("#/connections/apps?tab=credentials");
+    expect(seen).toEqual(["connections", "composio"]);
+    // And the query goes with it: the tab it named does not exist on the
+    // destination, so leaving it on the bar would hand out a dead address again.
+    expect(window.location.hash).toBe("#/connections/composio");
+  });
+
+  // The other side of that branch: Apps' own default tab was never a separate
+  // place, so neither address may be moved off the page they have always shown.
+  it.each(["#/connections/apps", "#/connections/apps?tab=providers"])(
+    "leaves %s on the Apps page",
+    async (hash) => {
+      rewrite = REWRITE_RETIRED;
+      await visit(hash);
+      expect(seen).toEqual(["connections", "apps"]);
+    },
+  );
+
   // #1867 review: `#/work` is a bare-only alias onto the ledgers board — the
   // Work surface's real sub-pages are addressed under `#/ledgers/...` (for
   // example `#/ledgers/manage`), never under `#/work/...`. Before this test,

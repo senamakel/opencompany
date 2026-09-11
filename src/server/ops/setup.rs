@@ -37,6 +37,10 @@
 //! which performs it, so a stricter guard here would be a boundary that the very
 //! next call does not enforce.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -49,7 +53,7 @@ use crate::company::setup::{
 };
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::server::error::ApiError;
 use crate::server::ops::scope::{ScopedCompany, scoped};
 
@@ -145,12 +149,106 @@ impl From<RosterProposal> for RosterProposalDto {
     }
 }
 
+/// Most roster-proposal calls one company may make inside
+/// [`ROSTER_PROPOSAL_WINDOW`] before `propose_roster` refuses the rest with a
+/// `429`. `pub(crate)` so the test module can assert the exact cap without
+/// duplicating the number.
+pub(crate) const ROSTER_PROPOSAL_BURST_LIMIT: usize = 8;
+
+/// The rolling window [`ROSTER_PROPOSAL_BURST_LIMIT`] applies over.
+const ROSTER_PROPOSAL_WINDOW: Duration = Duration::from_secs(60);
+
+const MAX_ROSTER_BURST_ENTRIES: usize = 1_024;
+
+/// One company's recent `propose_roster` call timestamps.
+#[derive(Default)]
+struct RosterBurst {
+    calls: Mutex<VecDeque<Instant>>,
+}
+
+/// Process-wide registry of [`RosterBurst`]s, one per recently active company.
+static ROSTER_BURSTS: LazyLock<Mutex<HashMap<CompanyId, Arc<RosterBurst>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn roster_burst_for(
+    company: &CompanyId,
+    now: Instant,
+) -> Result<Arc<RosterBurst>, crate::server::Rejection> {
+    let mut registry = ROSTER_BURSTS
+        .lock()
+        .expect("roster burst registry poisoned");
+    roster_burst_for_in(&mut registry, company, now)
+}
+
+fn roster_burst_for_in(
+    registry: &mut HashMap<CompanyId, Arc<RosterBurst>>,
+    company: &CompanyId,
+    now: Instant,
+) -> Result<Arc<RosterBurst>, crate::server::Rejection> {
+    if let Some(burst) = registry.get(company) {
+        return Ok(Arc::clone(burst));
+    }
+    registry.retain(|_, burst| {
+        if Arc::strong_count(burst) > 1 {
+            return true;
+        }
+        let mut calls = burst.calls.lock().expect("roster burst poisoned");
+        while calls
+            .front()
+            .is_some_and(|&at| now.saturating_duration_since(at) >= ROSTER_PROPOSAL_WINDOW)
+        {
+            calls.pop_front();
+        }
+        !calls.is_empty()
+    });
+    if registry.len() >= MAX_ROSTER_BURST_ENTRIES {
+        return Err(ApiError(OpenCompanyError::RosterProposalRateLimit {
+            limit: ROSTER_PROPOSAL_BURST_LIMIT,
+            window_secs: ROSTER_PROPOSAL_WINDOW.as_secs(),
+        })
+        .into_response()
+        .into());
+    }
+    let burst = Arc::new(RosterBurst::default());
+    registry.insert(company.clone(), Arc::clone(&burst));
+    Ok(burst)
+}
+
+/// Admits one `propose_roster` call for `company` at `now`, or refuses once
+/// [`ROSTER_PROPOSAL_BURST_LIMIT`] calls have already landed inside the
+/// trailing [`ROSTER_PROPOSAL_WINDOW`].
+fn admit_roster_proposal(
+    company: &CompanyId,
+    now: Instant,
+) -> Result<(), crate::server::Rejection> {
+    let burst = roster_burst_for(company, now)?;
+    let mut calls = burst.calls.lock().expect("roster burst poisoned");
+    while calls
+        .front()
+        .is_some_and(|&at| now.saturating_duration_since(at) >= ROSTER_PROPOSAL_WINDOW)
+    {
+        calls.pop_front();
+    }
+    if calls.len() >= ROSTER_PROPOSAL_BURST_LIMIT {
+        return Err(ApiError(OpenCompanyError::RosterProposalRateLimit {
+            limit: ROSTER_PROPOSAL_BURST_LIMIT,
+            window_secs: ROSTER_PROPOSAL_WINDOW.as_secs(),
+        })
+        .into_response()
+        .into());
+    }
+    calls.push_back(now);
+    Ok(())
+}
+
 /// `POST {scope}/setup/roster` — propose a starting roster.
 async fn propose_roster(
     company: ScopedCompany,
     State(_state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Json<RosterProposalDto>, crate::server::Rejection> {
+    admit_roster_proposal(company.id(), Instant::now())?;
+
     let answers: SetupAnswers = body.into();
 
     // Remember the answers first. The proposal below may take seconds and the
@@ -249,4 +347,42 @@ async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, crate::se
                 .into_response()
                 .into()
         })
+}
+
+#[cfg(test)]
+mod roster_burst_tests {
+    use super::*;
+
+    #[test]
+    fn roster_burst_registry_is_bounded_and_evicts_only_idle_entries() {
+        let now = Instant::now();
+        let mut registry = HashMap::new();
+        for index in 0..MAX_ROSTER_BURST_ENTRIES {
+            let burst = Arc::new(RosterBurst::default());
+            burst.calls.lock().unwrap().push_back(now);
+            registry.insert(CompanyId::new(format!("active-{index}")), burst);
+        }
+
+        let refused = roster_burst_for_in(&mut registry, &CompanyId::new("overflow"), now).is_err();
+        assert_eq!(
+            usize::from(refused),
+            1,
+            "a full registry of active bursts must refuse a new key"
+        );
+        assert_eq!(
+            registry.len(),
+            MAX_ROSTER_BURST_ENTRIES,
+            "company churn must not grow the registry past its cap"
+        );
+
+        let held = Arc::clone(registry.values().next().unwrap());
+        for burst in registry.values() {
+            burst.calls.lock().unwrap().clear();
+        }
+        let inserted = roster_burst_for_in(&mut registry, &CompanyId::new("replacement"), now)
+            .expect("idle entries make room for a new company");
+        assert!(registry.values().any(|burst| Arc::ptr_eq(burst, &held)));
+        assert!(registry.values().any(|burst| Arc::ptr_eq(burst, &inserted)));
+        assert_eq!(registry.len(), 2);
+    }
 }

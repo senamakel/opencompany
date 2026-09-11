@@ -97,6 +97,26 @@ export function TitleBarUtilities({
           // foreground `TITLE_BAR_ICON_BUTTON` applies.
           DISCORD_BLURPLE,
           "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
+          // The one item in this row allowed to go when the row runs out of
+          // width. Nothing here scrolls and everything else is `flex-none`, so
+          // the band has a hard minimum: measured in a browser, the profile
+          // group's right edge sits at 483px with the Notifications bell in the
+          // row and 447px without it, and below that the trailing controls fall
+          // under the shell's `overflow-hidden` (Codex).
+          //
+          // This glyph is what gives the bell's 36px back, and it is the right
+          // one to take it from: an external community invite rather than
+          // console function, the only control in the row that leaves the
+          // product, and the only one whose absence costs an operator nothing
+          // they cannot reach another way. The bell itself could not go — it is
+          // the only route to Approvals now, and a count that hides itself at
+          // narrow widths is the whole of issue #1018.
+          //
+          // `max-sm:hidden` rather than `hidden sm:inline-flex`: both halves of
+          // that pair are plain `display` utilities in one layer, so which wins
+          // is decided by Tailwind's emission order rather than by anything
+          // written here. A `max-` variant is a media block and simply wins.
+          "max-sm:hidden",
         )}
       >
         <DiscordIcon className="size-4" />

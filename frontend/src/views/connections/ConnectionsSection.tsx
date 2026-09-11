@@ -1,6 +1,7 @@
 import type { OpenCompanyClient } from "@/api/client";
 import { resolveConnectionPage } from "@/views/connection-pages";
 import { ApiKeyView } from "@/views/connections/ApiKeyView";
+import { ComposioView } from "@/views/connections/ComposioView";
 import { HostingView } from "@/views/HostingView";
 import { InferenceView } from "@/views/InferenceView";
 import { McpServersView } from "@/views/McpServersView";
@@ -81,6 +82,12 @@ export function ConnectionsSection({ client, company, sub }: Props) {
         <ApiKeyView key={company ?? "self"} client={client} company={company} />
       )}
       {page === "apps" && <OAuthView client={client} company={company} />}
+      {/* Remounted per company for the reason every credential page on this
+          rail is: a key typed for one company must never ride into another
+          company's Save. */}
+      {page === "composio" && (
+        <ComposioView key={company ?? "self"} client={client} company={company} />
+      )}
       {page === "mcp" && <McpServersView client={client} company={company} />}
       {page === "inference" && <InferenceView client={client} company={company} />}
       {/* Remounted per company, the same rule `SettingsSection` applied while

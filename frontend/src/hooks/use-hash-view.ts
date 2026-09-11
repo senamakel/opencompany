@@ -12,6 +12,20 @@ export function readSegments(): string[] {
 }
 
 /**
+ * The hash's query suffix: `#/connections/apps?tab=credentials` → `tab=credentials`.
+ *
+ * The half of the address `readSegments` throws away, and it is not always
+ * noise. A page that carried a linkable `?tab=` (`use-hash-tab.ts`) and then
+ * retired it has a bookmark to answer for, and the segments alone cannot tell
+ * that address apart from the page's default — see the `?tab=credentials`
+ * branch in `lib/console-route-rewrites.ts`.
+ */
+export function readQuery(): URLSearchParams {
+  const [, query = ""] = window.location.hash.split("?");
+  return new URLSearchParams(query);
+}
+
+/**
  * A tiny hash router: keeps the active view in `location.hash` (e.g.
  * `#/chat`, or `#/settings/people` for a view with sub-pages) so views
  * are linkable, survive refresh, and honor back/forward — without pulling in a
@@ -29,6 +43,13 @@ export function readSegments(): string[] {
  * so an address whose view no longer exists can be sent somewhere real instead
  * of silently collapsing onto `fallback`.
  *
+ * It is handed the hash's query beside the segments, because a retired address
+ * is not always a retired *path*: a page that carried a linkable `?tab=` and
+ * then split that tab out into a page of its own has a bookmark that differs
+ * from the live address by the query alone. The rewrite stays a pure function
+ * of the address — it reads the query it is given rather than `window` — so it
+ * is testable the way every other branch in it is.
+ *
  * The redirect lands through `canonicalize` below, which replaces rather than
  * pushes — and that is not an implementation detail. A retired address that
  * *pushed* its replacement would sit one Back away, bounce the operator forward
@@ -37,7 +58,11 @@ export function readSegments(): string[] {
 export function useHashView<T extends string>(
   valid: readonly T[],
   fallback: T,
-  rewrite?: (head: string, sub: string | null) => [T, string | null] | null,
+  rewrite?: (
+    head: string,
+    sub: string | null,
+    query: URLSearchParams,
+  ) => [T, string | null] | null,
   /**
    * How a route is spelled, when the console files some views under a prefix.
    *
@@ -72,7 +97,7 @@ export function useHashView<T extends string>(
     const prefixed = path?.parse(segments);
     if (prefixed) return prefixed;
     const [head, sub] = segments;
-    const rewritten = rewrite?.(head ?? "", sub ?? null);
+    const rewritten = rewrite?.(head ?? "", sub ?? null, readQuery());
     if (rewritten) return rewritten;
     // An unknown head takes its sub-page with it: the sub-page names a page of
     // a view that isn't on screen, so carrying it onto `fallback` would point

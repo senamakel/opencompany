@@ -1076,4 +1076,57 @@ mod tests {
             "https://api.tinyhumans.ai"
         );
     }
+
+    /// Fails every `get` for one chosen key, so a test can prove a read error
+    /// propagates instead of being swallowed into a fallback tier.
+    struct SecretsFailingToRead {
+        inner: MemSecrets,
+        blocked_key: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for SecretsFailingToRead {
+        async fn get(&self, c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+            if key == self.blocked_key {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "read refused by test".into(),
+                ));
+            }
+            self.inner.get(c, key).await
+        }
+        async fn set(&self, c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+            self.inner.set(c, key, value).await
+        }
+    }
+
+    /// A store read error on the BYO override key must fail the whole
+    /// resolution rather than degrade to the shared brokered tier: an
+    /// unreadable store that silently fell through to
+    /// [`company_key::resolve`] would let a call be attributed to the wrong
+    /// account precisely when the store cannot be trusted to say which
+    /// account was configured.
+    #[tokio::test]
+    async fn a_store_read_error_on_the_byo_token_propagates_rather_than_falling_back() {
+        let company = CompanyId::new("acme");
+        let secrets = SecretsFailingToRead {
+            inner: MemSecrets::default(),
+            blocked_key: TOKEN_KEY,
+        };
+        // A managed-tier credential that *would* answer if resolution fell
+        // through to it — proving the error surfaces rather than that there
+        // was nothing to fall back to.
+        secrets
+            .inner
+            .set(&company, TOKEN_KEY, SecretValue("unreachable".into()))
+            .await
+            .unwrap();
+
+        let err = resolve_credential(&company, &secrets, None)
+            .await
+            .expect_err("an unreadable secret store must not resolve to any credential");
+        assert!(
+            matches!(err, crate::error::OpenCompanyError::Store(_)),
+            "expected the store error to propagate untouched, got {err:?}"
+        );
+    }
 }

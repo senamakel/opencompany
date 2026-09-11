@@ -53,12 +53,10 @@
 //!
 //! # Where the money is stopped
 //!
-//! Metering is a rear-view mirror, so the cap is enforced *before* the call, in
-//! [`SearchCallLedger`]: one shared, company-keyed, UTC-day-bucketed counter. A
-//! call reserves a slot, and a reservation is **refunded** if the search never
-//! reached the backend, so a broken endpoint cannot burn a company's day.
-//! Over-cap returns a loud, well-formed tool error naming the ceiling — never an
-//! empty result set, which is the shape that makes a model fabricate.
+//! [`SearchCallLedger`] reserves one company-scoped slot before each call.
+//! Pre-dispatch authentication failures refund it. Once a request is attempted,
+//! an error retains the slot and reports the uncertainty to the caller.
+//! Over-cap calls return a tool error naming the ceiling.
 //!
 //! The ledger is in-process: it resets on restart and does not span replicas.
 //! That is the v1 position the issue records, and it is a *ceiling on runaway
@@ -306,6 +304,7 @@ pub fn search_tools(backend: &SearchBackend, metering: SearchMetering) -> Vec<Bo
     vec![Box::new(WebSearchTool {
         backend: backend.clone(),
         metering,
+        pre_dispatch: search_pre_dispatch,
     })]
 }
 
@@ -317,6 +316,30 @@ pub fn search_tools(backend: &SearchBackend, metering: SearchMetering) -> Vec<Bo
 struct WebSearchTool {
     backend: SearchBackend,
     metering: SearchMetering,
+    pre_dispatch: fn() -> anyhow::Result<()>,
+}
+
+enum SearchDispatchError {
+    BeforeDispatch(anyhow::Error),
+    AfterDispatchAttempt(anyhow::Error),
+}
+
+fn search_pre_dispatch() -> anyhow::Result<()> {
+    oh::security::egress::enforce_egress(&oh::security::egress::EgressDescriptor::integration(
+        SEARCH_PATH,
+    ))
+}
+
+async fn dispatch_search(
+    client: &IntegrationClient,
+    body: &Value,
+    pre_dispatch: fn() -> anyhow::Result<()>,
+) -> Result<SearchResponse, SearchDispatchError> {
+    pre_dispatch().map_err(SearchDispatchError::BeforeDispatch)?;
+    client
+        .post(SEARCH_PATH, body)
+        .await
+        .map_err(SearchDispatchError::AfterDispatchAttempt)
 }
 
 impl WebSearchTool {
@@ -479,28 +502,24 @@ impl Tool for WebSearchTool {
         });
 
         let client = IntegrationClient::new(self.backend.backend_url.clone(), token.clone());
-        let response: SearchResponse = match client.post(SEARCH_PATH, &body).await {
+        let response = match dispatch_search(&client, &body, self.pre_dispatch).await {
             Ok(response) => response,
-            Err(err) => {
-                // Nothing was charged, so nothing is metered and the slot goes
-                // back.
+            Err(SearchDispatchError::BeforeDispatch(err)) => {
                 self.backend.calls.refund(company, now);
-                // The operator log carries the cause — an unreachable backend is
-                // undiagnosable without it — but scrubbed against the bearer
-                // that just went out, because a non-2xx error folds the backend's
-                // response body into this chain and a body can reflect the
-                // credential. The `composio` per-call scrub vector, exactly.
-                tracing::warn!(
-                    company = %company,
-                    agent = %self.metering.agent,
-                    error = %crate::harness::mcp_probe::scrub(&err.to_string(), &[token]),
-                    "[search] managed search failed; slot refunded, nothing metered"
-                );
-                return Ok(ToolResult::error(
-                    "Web search failed to reach the search backend. Tell the operator search is \
-                     unavailable — do not invent sources or citations."
-                        .to_string(),
-                ));
+                let detail = crate::harness::mcp_probe::scrub(&err.to_string(), &[token]);
+                return Ok(ToolResult::error(format!(
+                    "Web search was blocked before dispatch: {detail}. Its daily search slot was \
+                     refunded. Tell the operator search is unavailable — do not invent sources \
+                     or citations."
+                )));
+            }
+            Err(SearchDispatchError::AfterDispatchAttempt(err)) => {
+                let detail = crate::harness::mcp_probe::scrub(&err.to_string(), &[token]);
+                return Ok(ToolResult::error(format!(
+                    "Web search returned no usable results: {detail}. The request may have \
+                     reached the backend, so its daily search slot is retained. Tell the \
+                     operator search is unavailable — do not invent sources or citations."
+                )));
             }
         };
 
@@ -1084,15 +1103,8 @@ mod tests {
         assert_eq!(schema["required"][0], "query");
     }
 
-    /// A malformed-but-2xx backend body (a real HTTP response, just not one
-    /// `SearchResponse` deserializes) refunds the ledger slot exactly like an
-    /// unreachable backend does — even though a 2xx status means the backend
-    /// was reached and may already have dispatched (and billed) the search
-    /// server-side. The client cannot tell "never reached the backend" apart
-    /// from "reached it, but the reply was unparseable", so this pins today's
-    /// behaviour: the slot comes back and the caller loses no quota either way.
     #[tokio::test]
-    async fn a_malformed_2xx_response_still_refunds_the_slot() {
+    async fn a_malformed_2xx_response_retains_the_spent_slot() {
         use axum::Json;
         use axum::routing::post;
 
@@ -1134,11 +1146,162 @@ mod tests {
         let now = crate::ports::now_millis();
         assert_eq!(
             backend.ledger().used_today(&acme, now),
-            0,
-            "today's pinned behaviour: the slot is refunded even though the \
-             backend was actually reached and may have already run (and billed) \
-             the search — this is the HT-098 undercounting gap, not a proof \
-             that undercounting is safe"
+            1,
+            "a response parsing failure must not refund a request the backend received"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_backend_responses_cannot_reopen_the_daily_search_budget() {
+        use axum::http::StatusCode;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for (status, body) in [
+            (StatusCode::OK, "not json"),
+            (StatusCode::OK, r#"{"success":true,"data":{}}"#),
+            (
+                StatusCode::OK,
+                r#"{"success":false,"error":"failed after dispatch"}"#,
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"managed-token"}"#,
+            ),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&calls);
+            let app = axum::Router::new().route(
+                SEARCH_PATH,
+                axum::routing::post(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    async move { (status, body) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let company = CompanyId::new("acme");
+            let backend = SearchBackend::new(
+                format!("http://{addr}"),
+                Credential::from_value("managed-token"),
+                1,
+            );
+            let tools = search_tools(
+                &backend,
+                SearchMetering {
+                    company: company.clone(),
+                    agent: "ceo".into(),
+                    meter: None,
+                },
+            );
+            let first = tools[0].execute(json!({"query": "pricing"})).await.unwrap();
+            assert!(first.is_error);
+            assert!(
+                !first.output().contains("managed-token"),
+                "backend diagnostics must redact the credential"
+            );
+            assert!(
+                first.output().contains("slot is retained"),
+                "the caller must see the accounting outcome: {}",
+                first.output()
+            );
+            assert_eq!(
+                backend
+                    .ledger()
+                    .used_today(&company, crate::ports::now_millis()),
+                1,
+                "a response failure must retain its reservation"
+            );
+            let second = tools[0]
+                .execute(json!({"query": "retry pricing"}))
+                .await
+                .unwrap();
+            assert!(second.is_error);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "a failed response must not permit another backend dispatch"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_credential_refunds_the_pre_dispatch_search_reservation() {
+        let company = CompanyId::new("acme");
+        let backend = SearchBackend::new(
+            "http://127.0.0.1:1".to_string(),
+            Credential::from_value(""),
+            1,
+        );
+        let tools = search_tools(
+            &backend,
+            SearchMetering {
+                company: company.clone(),
+                agent: "ceo".into(),
+                meter: None,
+            },
+        );
+        for _ in 0..2 {
+            let result = tools[0].execute(json!({"query": "pricing"})).await.unwrap();
+            assert!(result.is_error);
+            assert!(
+                result.output().contains("no managed search credential"),
+                "the request must stop before dispatch: {}",
+                result.output()
+            );
+            assert_eq!(
+                backend
+                    .ledger()
+                    .used_today(&company, crate::ports::now_millis()),
+                0,
+                "pre-dispatch failure must refund its slot"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proven_pre_dispatch_failure_refunds_the_search_reservation() {
+        fn blocked_before_dispatch() -> anyhow::Result<()> {
+            anyhow::bail!("pre-dispatch policy refusal")
+        }
+
+        let company = CompanyId::new("acme");
+        let backend = SearchBackend::new(
+            "http://127.0.0.1:1".to_string(),
+            Credential::from_value("managed-token"),
+            1,
+        );
+        let tool = WebSearchTool {
+            backend: backend.clone(),
+            metering: SearchMetering {
+                company: company.clone(),
+                agent: "ceo".into(),
+                meter: None,
+            },
+            pre_dispatch: blocked_before_dispatch,
+        };
+
+        for _ in 0..2 {
+            let result = tool
+                .execute(json!({"query": "competitor pricing"}))
+                .await
+                .unwrap();
+            assert!(result.is_error);
+            assert!(
+                result.output().contains("slot was refunded"),
+                "the accounting outcome must be explicit: {}",
+                result.output()
+            );
+            assert_eq!(
+                backend
+                    .ledger()
+                    .used_today(&company, crate::ports::now_millis()),
+                0,
+                "a failure proven to precede dispatch must refund its slot"
+            );
+        }
     }
 }
