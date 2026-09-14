@@ -24,4 +24,4 @@ REPO_ROOT=$(CDPATH='' cd -- "${SCRIPT_DIR}/.." && pwd)
 FEATURES=${OPENCOMPANY_DUMP_FEATURES:-openhuman}
 
 cd "$REPO_ROOT"
-exec cargo run --quiet --features "$FEATURES" --bin opencompany -- prompt "$@"
+exec cargo run --quiet -p opencompany-core --features "$FEATURES" --bin opencompany -- prompt "$@"

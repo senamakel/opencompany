@@ -427,7 +427,14 @@ fn built_in_lane(
             manifest_inference,
             env_default,
         )
-        .with_scope(HarnessScope::named(&harness.id)),
+        .with_scope(
+            HarnessScope::named(&harness.id)
+                // Reported here because this is the only place that still knows.
+                // Two lines up the two sources are merged into one value, and
+                // the resolver has to tell them apart to decide whether the
+                // company's provider list outranks this harness.
+                .declaring_own_inference(harness.inference.is_some()),
+        ),
     );
 
     let mut deps = base.clone();

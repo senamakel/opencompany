@@ -89,7 +89,14 @@ export function ConnectionsSection({ client, company, sub }: Props) {
         <ComposioView key={company ?? "self"} client={client} company={company} />
       )}
       {page === "mcp" && <McpServersView client={client} company={company} />}
-      {page === "inference" && <InferenceView client={client} company={company} />}
+      {/* Remounted per company, the same rule every other view on this rail
+          follows. Without it this hook stays mounted across a switch, so a
+          read started for the previous company can land after the new one's
+          and render its providers and routes under the new scope — and a row
+          control pressed then writes to the company now in scope. */}
+      {page === "inference" && (
+        <InferenceView key={company ?? "self"} client={client} company={company} />
+      )}
       {/* Remounted per company, the same rule `SettingsSection` applied while
           this page lived on its rail: `canManage` and the Add dialog's draft
           must not carry one company's admin authority into another's

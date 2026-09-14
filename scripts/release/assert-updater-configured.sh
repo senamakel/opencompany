@@ -3,13 +3,13 @@
 #
 # The updater has two halves that must agree, and they live in different places
 # on purpose: the minisign PUBLIC key is committed in
-# `src-tauri/tauri.conf.json`, and the PRIVATE key is a GitHub Actions secret
+# `crates/opencompany-app/tauri.conf.json`, and the PRIVATE key is a GitHub Actions secret
 # that is not in this repository and must never be. Nothing in Tauri checks
 # either one at build time — `plugins.updater.pubkey` is read as an opaque
 # string and only parsed when a downloaded bundle is verified, on somebody
 # else's machine, after they have already spent 100 MB of their bandwidth.
 #
-# So this is the loud half. `src-tauri/src/update.rs` makes a build carrying the
+# So this is the loud half. `crates/opencompany-app/src/update.rs` makes a build carrying the
 # placeholder key *silent* — it reports no update rather than offering one it
 # could never verify — and this script makes shipping that build *impossible*.
 # Between them, the failure mode is a red release job rather than an error
@@ -30,7 +30,7 @@
 # `docs/spec/runtime/desktop-updates.md`.
 set -euo pipefail
 
-CONF="${1:-src-tauri/tauri.conf.json}"
+CONF="${1:-crates/opencompany-app/tauri.conf.json}"
 
 if [ ! -f "$CONF" ]; then
   echo "::error::assert-updater-configured: $CONF not found (run from the repository root)" >&2
@@ -52,7 +52,7 @@ fi
 # base64 of `untrusted comment:`, so a key that does not start with it is not a
 # minisign public key — which is exactly what the committed placeholder is not.
 #
-# The same prefix is the test in `src-tauri/src/update.rs::is_configured`, and a
+# The same prefix is the test in `crates/opencompany-app/src/update.rs::is_configured`, and a
 # unit test there asserts the committed config still fails it. The two agree by
 # construction: this script says "not yet", that one says "still not".
 case "$PUBKEY" in

@@ -5,12 +5,12 @@ console stays one codebase and the server stays one binary; what the split adds
 are the seams a desktop needs — several hosts at once, a credential a webview
 can carry, and a host running in-process.
 
-Code: `src-tauri/` (a separate crate, not a workspace member) and
+Code: `crates/opencompany-app/` (excluded from the root workspace) and
 `frontend/src/connections/`.
 
-## Why `src-tauri` is not a workspace member
+## Why `crates/opencompany-app` is excluded from the workspace
 
-Making it one would put the whole Tauri tree into `cargo metadata --locked`,
+Making it a member would put the whole Tauri tree into `cargo metadata --locked`,
 which CI runs first on a runner with no webkit or GTK — turning a desktop-only
 dependency into a hard requirement for checking the server. The host stays a
 plain `path` dependency, so a change to it is picked up with no publishing step.
@@ -26,7 +26,7 @@ There used to be two. `frontend/src-tauri/` was a second Tauri crate sharing
 this one's `productName`, and which one a `tauri` invocation picked up was
 decided by the working directory in a way most people do not expect: **the CLI
 searches subfolders of the working directory, not ancestors.** From `frontend/`
-it found the wrapper; from the repository root or from `src-tauri/` it finds
+it found the wrapper; from the repository root or from `crates/opencompany-app/` it finds
 this one.
 
 `tauri:dev` and `tauri:build` are scripts in `frontend/package.json`, and npm
@@ -44,31 +44,31 @@ lane, and the packaging steps ran from the two directories that find the shell.
 A second app is not a hazard that becomes safe by being currently correct — the
 ambiguity is the hazard — so the wrapper is deleted, `frontend/package.json`
 points `tauri:dev` at `scripts/desktop-dev.sh` and `tauri:build` at
-`src-tauri/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
+`crates/opencompany-app/`, and `scripts/ci/assert-single-tauri-app.sh` fails the build on
 either a second `tauri.conf.json` or a script that invokes a bare `tauri`.
 
 ## What the desktop compiles in
 
 The desktop links the host with an explicit feature set, and it is declared in
 **two** places — reading only the first is issue #1738. The manifest's list, on
-the `opencompany` dependency in `src-tauri/Cargo.toml`:
+the `opencompany-core` dependency in `crates/opencompany-app/Cargo.toml`:
 
 ```toml
-opencompany = { path = "..", default-features = false, features = [
+opencompany-core = { path = "../opencompany-core", default-features = false, features = [
   "sqlite", "platform-jwt", "oauth", "mcp", "tinymemory",
 ] }
 ```
 
 and the shipped set, passed on the `tauri` command line as
-`DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`:
+`DESKTOP_RELEASE_FEATURES` in `.github/workflows/build-desktop.yml`:
 
 ```text
-opencompany/acp,opencompany/composio
+opencompany-core/acp,opencompany-core/composio
 ```
 
-Those two are `= ["openhuman"]` in the root manifest — pure `cfg` switches that
+Those two are `= ["openhuman"]` in the host's manifest — pure `cfg` switches that
 pull no `dep:` entry, and `mcp` already enables `openhuman` — so turning them on
-adds no package and leaves `src-tauri/Cargo.lock` byte-identical, which is what
+adds no package and leaves `crates/opencompany-app/Cargo.lock` byte-identical, which is what
 lets a release still build `--locked`. A feature gating an optional dependency
 could not be passed this way and would have to move into the manifest.
 
@@ -127,7 +127,7 @@ none of the vendored crates were reachable from here, so the table could be
 omitted. Now it cannot: without it Cargo resolves `tinycortex-api`, `tinyflows`
 and the rest from crates.io — where some do not exist at all — and any that did
 resolve would be a *second* copy whose trait identities would not match the ones
-the host compiled against. `src-tauri/Cargo.toml` therefore carries a replica of
+the host compiled against. `crates/opencompany-app/Cargo.toml` therefore carries a replica of
 the host's table with every path prefixed `../`. Keep the two in step.
 
 ### Attaching the harness is the library's job
@@ -161,7 +161,7 @@ dev profile and a release build would recompile the host for no extra claim;
 `--no-bundle` because the failure being gated happens at the first step of
 `tauri build`, long before a `.deb` exists.
 
-There are two of them, from the repository root and from `src-tauri/`. Every
+There are two of them, from the repository root and from `crates/opencompany-app/`. Every
 other step in this lane runs from the repository root, which is the one place
 the broken hook happened to work — a single-directory packaging step is how #616
 stayed invisible. Nothing working-directory-dependent survives in the config
@@ -174,7 +174,7 @@ package**:
 
 ```sh
 npm --prefix frontend run build     # from the repository root
-cargo tauri build -- --features opencompany/acp,opencompany/composio
+cargo tauri build -- --features opencompany-core/acp,opencompany-core/composio
 ```
 
 The `--features` is not optional decoration. `tauri build` without it packages
@@ -185,16 +185,16 @@ tauri:build` carries the same string, and
 `scripts/ci/assert-desktop-features.sh` fails if the two drift from
 `DESKTOP_RELEASE_FEATURES`.
 
-`frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
+`frontendDist` is resolved relative to `crates/opencompany-app/`, where `tauri.conf.json`
 lives, so it means the same thing from every working directory. A hook does not:
 Tauri runs it from an app directory it *derives*, by scanning for a
 `package.json`, and which one it finds is not stable across machines. The
-committed `../frontend` escaped the repository entirely from `src-tauri/`
+committed `../frontend` escaped the repository entirely from `crates/opencompany-app/`
 ([#616](https://github.com/tinyhumansai/opencompany/issues/616)), and the
 opposite prefix fails from the repository root — each is correct in exactly the
 directory that hides the other:
 
-| hook value    | from repo root | from `src-tauri/` |
+| hook value    | from repo root | from `crates/opencompany-app/` |
 | ------------- | -------------- | ----------------- |
 | `../frontend` | passes         | **fails** — what shipped |
 | `frontend`    | **fails**      | passes            |
@@ -212,7 +212,7 @@ Deleting the hook removes the whole class. The cost is that `tauri dev` no longe
 starts Vite for you, which is what `scripts/desktop-dev.sh` is for: it brings the
 console up on `localhost:5173` — reusing one already there, never killing
 somebody else's — waits until that port answers with the console rather than
-with a stranger's page, and then runs `tauri dev` from `src-tauri/`.
+with a stranger's page, and then runs `tauri dev` from `crates/opencompany-app/`.
 `npm run tauri:dev` in `frontend/` is that script. Driving `tauri dev` by hand
 instead means running `npm --prefix frontend run dev` alongside it; `devUrl`
 already points at `localhost:5173`. The other cost is that packaging a stale
@@ -307,7 +307,7 @@ The desktop routes through Rust for three reasons, in the order they bite:
 3. **Streaming.** `EventSource` cannot set a request header, so it cannot carry
    the session header, and a `SameSite=Lax` cookie is never sent cross-site.
 
-`src-tauri/tests/proxy_parity.rs` runs both transports against one real host and
+`crates/opencompany-app/tests/proxy_parity.rs` runs both transports against one real host and
 compares, because the console's error handling reads the status, the body and a
 response header — a transport that differed in any of them would produce
 different `ApiError`s on the desktop for the same server behaviour.
@@ -369,7 +369,7 @@ replayable by whoever copies it down
 
 So a second rule sits beside the first: **a credential travels over HTTPS, or to
 a host on this machine, and nowhere else.** `may_carry_a_credential` in
-`src-tauri/src/proxy/mod.rs` is the one that enforces it, with
+`crates/opencompany-app/src/proxy/mod.rs` is the one that enforces it, with
 `mayCarryACredential` in `frontend/src/api/transport/index.ts` as the console's
 copy — the same arrangement as `isAddressableBaseUrl`, and for the same reason:
 a check in the console alone is bypassed by anything reaching the proxy
@@ -400,20 +400,20 @@ passer-by could not have asked the host for themselves. Three surfaces apply it:
   before contacting it, so the row says what is wrong instead of blaming the
   network.
 
-The webview also runs under a CSP (`src-tauri/tauri.conf.json`) whose
+The webview also runs under a CSP (`crates/opencompany-app/tauri.conf.json`) whose
 `connect-src` allows the IPC origin only. All host traffic goes through Rust and
 needs nothing else.
 
 ## The embedded host
 
-`src-tauri/src/embedded.rs` runs a real host in-process on `127.0.0.1:0`,
+`crates/opencompany-app/src/embedded.rs` runs a real host in-process on `127.0.0.1:0`,
 holding the data root's lock (see [`data-root.md`](data-root.md)). It becomes an
 ordinary connection in the console, discovered through `oc_embedded` because
 only the core knows which port the OS chose.
 
 That root is the same canonical data directory as the CLI: `$HOME/.opencompany`
 (or `%USERPROFILE%\.opencompany` on Windows). `default_data_dir` in
-`src-tauri/src/lib.rs` delegates to the host resolver and passes the result
+`crates/opencompany-app/src/lib.rs` delegates to the host resolver and passes the result
 explicitly to `app::prepare_instance`. `OPENCOMPANY_DATA_DIR` overrides it for
 both launchers. See [the desktop root](data-root.md#the-desktop-root-is-the-cli-root).
 

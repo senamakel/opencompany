@@ -393,11 +393,11 @@ running on an operator-supplied credential rather than a signed-in account.
 | the `AcpAgent`/`AcpAgentFactory`/`AcpObserver` ports (ungated) | `src/ports/acp.rs` |
 | the ACP `RunTurn` (folds a port `AcpTurn` into `TurnStep`) | `src/harness/acp/run_turn.rs` |
 | live frames while an ACP turn runs (`live_frame_from`, `observer_for`) | `src/harness/acp/run_turn.rs` |
-| remembering + resuming a session (`session_record_path`, `resume_session`) | `src-tauri/src/acp/local_agent.rs` |
-| the transport's bounds on a tool call's title/result | `src-tauri/src/acp/local_agent.rs` (`MAX_TITLE_CHARS`, `MAX_RESULT_CHARS`) |
+| remembering + resuming a session (`session_record_path`, `resume_session`) | `crates/opencompany-app/src/acp/local_agent.rs` |
+| the transport's bounds on a tool call's title/result | `crates/opencompany-app/src/acp/local_agent.rs` (`MAX_TITLE_CHARS`, `MAX_RESULT_CHARS`) |
 | wiring an `AcpAgentFactory` onto a host | `AppState::with_acp_agents` (`src/app/types.rs`), consumed by `desktop::register` |
-| local transport: discovery, spawn, codec | `src-tauri/src/acp/` (`client.rs`, `discovery.rs`, `confine.rs`) |
-| the `local` `AcpAgentFactory` implementation | `src-tauri/src/acp/local_agent.rs` (`LocalAcpAgent`/`LocalAcpAgentFactory`) |
-| the desktop's own wiring | `src-tauri/src/embedded.rs` |
+| local transport: discovery, spawn, codec | `crates/opencompany-app/src/acp/` (`client.rs`, `discovery.rs`, `confine.rs`) |
+| the `local` `AcpAgentFactory` implementation | `crates/opencompany-app/src/acp/local_agent.rs` (`LocalAcpAgent`/`LocalAcpAgentFactory`) |
+| the desktop's own wiring | `crates/opencompany-app/src/embedded.rs` |
 | runner transport (declared, not yet an engine) | `src/runner/dispatch.rs` |
 | per-harness roster narrowing | `HarnessDeps::serves` |

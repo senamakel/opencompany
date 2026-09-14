@@ -1,0 +1,106 @@
+# Promote main into the long-lived `release` branch, on demand.
+#
+# This is step one of the release flow (docs/spec/runtime/releases.md):
+#
+#   promote-main-to-release  →  release-staging  →  release-production
+#
+# A maintainer dispatches this to take a snapshot of main. It pushes a merge
+# commit from main into `release` directly — no PR — and then dispatches `ci.yml`
+# against `release` so the snapshot gets a CI run (see "Run CI" below for why
+# that has to be explicit). Production releases are cut from `release` only;
+# staging cuts may come from `main` or `release`. Fixes for anything found on
+# `release` are PRs opened against `release`; each cut merges `release` back
+# into main so nothing is lost.
+#
+# Merge, not reset: re-dispatching refreshes `release` with main's latest while
+# preserving fix commits already on `release`. When `release` already contains
+# main this is a no-op.
+#
+# Issue #590. Every `uses:` below is a full commit SHA with the resolved version
+# in a trailing comment; the rationale is at the top of `ci.yml`.
+name: Promote main to release
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write # to dispatch ci.yml on the promoted branch
+
+concurrency:
+  group: promote-main-to-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Merge main into release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Guard dispatch ref
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Dispatch this workflow from main (got $GITHUB_REF). It merges main into release; the ref it runs from is main by definition." >&2
+          exit 1
+
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # This job PUSHES. `actions/checkout` stores GITHUB_TOKEN as an
+          # `http.extraheader` for this checkout only, which is what `git push`
+          # below authenticates with — no token in a remote URL, nothing that
+          # `set -x` could ever print. Every other checkout in this repo says
+          # `false`; those jobs do not push.
+          persist-credentials: true
+
+      - name: Merge main into release and push
+        run: |
+          set -euo pipefail
+          log() { echo "[promote] $*"; }
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          log "main is at $(git rev-parse origin/main)"
+
+          if ! git fetch origin release 2>/dev/null; then
+            log "release branch does not exist — bootstrapping it from main"
+            git push origin origin/main:refs/heads/release
+            log "created release at $(git rev-parse origin/main)"
+            echo "promoted=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          log "release is at $(git rev-parse origin/release)"
+
+          if git merge-base --is-ancestor origin/main origin/release; then
+            log "release already contains main — nothing to promote"
+            echo "::notice::release already contains main; no promotion needed."
+            echo "promoted=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git checkout -B release origin/release
+          if ! git merge origin/main -m "chore(release): merge main into release"; then
+            git merge --abort
+            echo "::error::main→release merge hit conflicts. Open a fix PR against release (or merge main into release by hand), then re-dispatch." >&2
+            exit 1
+          fi
+          git push origin HEAD:release
+          log "release advanced to $(git rev-parse HEAD)"
+          echo "promoted=true" >> "$GITHUB_ENV"
+
+      # A push made with GITHUB_TOKEN does not fire `push` workflows — GitHub's
+      # guard against workflows triggering themselves forever. So the merge
+      # commit on `release` would otherwise sit there with no CI run, and the
+      # next production cut would be the first thing to compile it. Dispatch
+      # the run explicitly instead; `ci.yml` accepts `workflow_dispatch` for
+      # exactly this.
+      - name: Run CI on release
+        if: env.promoted == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run ci.yml --ref release -R "$GITHUB_REPOSITORY"
+          echo "Dispatched ci.yml on release. Next: dispatch **Release Staging** or **Release Production** from the \`release\` branch." >> "$GITHUB_STEP_SUMMARY"

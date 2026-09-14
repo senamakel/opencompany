@@ -11,7 +11,7 @@
 # broken", not "the compiler moved".
 #
 # Pinning fixes that, but only while the pins agree. Four call sites in `ci.yml`
-# and one in `release.yml` each name the version separately, because the
+# and the release workflows each name the version separately, because the
 # workflow comment there wants the selection visible to a reader at the call
 # site rather than hidden behind an action ref. Five copies of a version is five
 # chances to bump four. A partial bump is worse than no bump: the lanes split,

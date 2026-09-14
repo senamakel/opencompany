@@ -4,7 +4,7 @@ set -eu
 
 company=${OPENCOMPANY_COMPANY:-marketing_agency}
 
-set -- run --bin opencompany
+set -- run -p opencompany-core --bin opencompany
 if [ -n "${OPENCOMPANY_FEATURES:-}" ]; then
     set -- "$@" --features "$OPENCOMPANY_FEATURES"
 fi

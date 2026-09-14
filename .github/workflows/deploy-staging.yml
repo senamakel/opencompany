@@ -36,8 +36,11 @@ on:
     # something that is?
     paths:
       - 'src/**'
+      - 'crates/opencompany-core/**' # the host's manifest: features and dependencies
+      - 'crates/opencompany-tui/**' # a workspace member the builder has to COPY
       - 'frontend/**'
       - 'companies/**'
+      - 'globals/**' # COPYed into the builder (Dockerfile) and embedded by build.rs
       - 'skills/**' # COPYed into the runtime image (Dockerfile) as the shared library
       - 'docker/**' # entrypoint.sh, which is COPYed and is the container's ENTRYPOINT
       - 'Cargo.toml'

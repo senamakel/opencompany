@@ -319,7 +319,7 @@ mod tests {
 
     const CAMPAIGN: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/companies/marketing_agency/workflows/campaign_pipeline.toml"
+        "/../../companies/marketing_agency/workflows/campaign_pipeline.toml"
     ));
 
     /// The shipped campaign pipeline translates into a graph tinyflows accepts,

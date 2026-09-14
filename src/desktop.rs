@@ -654,7 +654,7 @@ mod tests {
     /// is where the embedded path does the most work that disk gets for free.
     #[test]
     fn the_embedded_roster_matches_the_bundle_on_disk() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("companies");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../companies");
 
         for preset in PRESETS {
             let bundle = root.join(preset.id);

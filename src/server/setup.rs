@@ -1258,7 +1258,18 @@ async fn probe_inference<E: EnvSource + Sync>(
         "ollama" | "openai_compatible"
     ) {
         let bearer = decl.bearer().await.ok().flatten();
-        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref())
+        // The provider the operator just chose, through the same catalogue
+        // lookup every other caller uses — **not** a hardcoded bearer. A wizard
+        // that always probes with `Authorization: Bearer` breaks Anthropic
+        // during setup in exactly the way it broke the model picker, and the
+        // first thing a new operator would see is a 400 on a good key.
+        //
+        // This branch only runs for `ollama` and `openai_compatible` today, both
+        // of which are bearer-or-nothing, so the lookup changes no behaviour
+        // now. It is here so that widening the branch cannot silently
+        // reintroduce the bug.
+        let auth = crate::company::inference::catalogue::auth_style_for(&req.provider);
+        crate::server::inference_models::discover_models(&decl.base_url, bearer.as_deref(), auth)
             .await
             .ok()
             .and_then(|models| models.into_iter().next())

@@ -14,7 +14,6 @@ id = "week_end"
 kind = "trigger"
 name = "End of the week"
 summary = "Runs every Friday afternoon."
-schedule = "0 16 * * 5"
 
 [[node]]
 id = "gather"

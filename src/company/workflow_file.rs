@@ -1022,10 +1022,13 @@ pub fn list_source_workflows(source_dir: Option<&Path>) -> Vec<WorkflowFile> {
 /// sources: the version-controlled seed file (`source_dir/workflows/<id>.toml`)
 /// and the record's runtime-authored [`OverlayWorkflow`] bodies.
 ///
-/// This is the single read path for "give me graph `<id>`" — the REST
-/// `GET …/workflows/{wid}` and run routes, the GraphQL resolver, the
-/// orchestrator's `run_workflow` tool, and the `sub_workflow` resolver all go
-/// through it, so they can never disagree about which graphs exist.
+/// The company's own two sources and nothing else: a **global** graph is in
+/// neither, so this returns `Ok(None)` for one. Readers that resolve an id an
+/// operator could have meant — the REST `GET …/workflows/{wid}` and run routes,
+/// the GraphQL resolver, the orchestrator's `run_workflow` tool, the
+/// `sub_workflow` resolver, and both resume paths — go through
+/// [`load_workflow_with_globals`] instead, so they can never disagree about
+/// which graphs exist.
 ///
 /// **The seed file wins on an id collision.** An overlay body with the same id
 /// as a committed file is shadowed, not destroyed — it stays on the record and
@@ -1066,6 +1069,9 @@ pub fn load_workflow_with_globals(
     if let Some(file) = load_company_workflow_union(source_dir, overlays, id)? {
         return Ok(Some(file));
     }
+    if claims_workflow_id(source_dir, id) {
+        return Ok(None);
+    }
     if crate::globals::disabled(disable, "workflow", id) {
         return Ok(None);
     }
@@ -1077,6 +1083,18 @@ pub fn load_workflow_with_globals(
             workflow.global = true;
             workflow
         }))
+}
+
+/// Whether the company's seed directory claims `id`, whatever the file there
+/// turns out to hold.
+///
+/// A graph file the company committed under this id is a claim on it, and a
+/// claim the loader could not honour — a body whose own id disagrees with the
+/// filename is skipped — must not become a global instead. Resolving a
+/// different graph under an id the company named is worse than resolving none:
+/// releasing a parked approval would run nodes nobody asked for.
+fn claims_workflow_id(source_dir: Option<&Path>, id: &str) -> bool {
+    source_dir.is_some_and(|dir| dir.join("workflows").join(format!("{id}.toml")).is_file())
 }
 
 /// The company's own two sources — seed file, then overlay — with no baseline.
@@ -1143,6 +1161,15 @@ pub fn list_workflows_with_globals(
     overlays: &[crate::ports::types::OverlayWorkflow],
     disable: &[String],
 ) -> Vec<WorkflowFile> {
+    list_workflows_with_global_baseline(source_dir, overlays, disable, crate::globals::workflows())
+}
+
+pub(crate) fn list_workflows_with_global_baseline(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+    globals: &[WorkflowFile],
+) -> Vec<WorkflowFile> {
     let mut files = list_company_workflows_union(source_dir, overlays);
     // Reserved by *claim*, not by successful parse: a malformed seed file or
     // overlay still names an id the company owns, and `load_workflow_with_globals`
@@ -1152,7 +1179,7 @@ pub fn list_workflows_with_globals(
     // loader can never actually return it, exposing an entry this list cannot
     // back.
     let reserved = reserved_company_workflow_ids(source_dir, overlays);
-    for workflow in crate::globals::workflows() {
+    for workflow in globals {
         if reserved.contains(&workflow.id)
             || crate::globals::disabled(disable, "workflow", &workflow.id)
         {
@@ -2589,7 +2616,7 @@ mod tests {
 
     const CAMPAIGN: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/companies/marketing_agency/workflows/campaign_pipeline.toml"
+        "/../../companies/marketing_agency/workflows/campaign_pipeline.toml"
     ));
 
     #[test]
@@ -4002,7 +4029,7 @@ mod tests {
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/companies/game_studio/workflows/game_build_pipeline.toml"
+            "/../../companies/game_studio/workflows/game_build_pipeline.toml"
         ));
         parse_workflow(GAME).expect("the game-studio guarded loop is valid");
     }
@@ -5076,7 +5103,7 @@ to = "done"
     /// build error naming the path rather than a silently-skipped test.
     const CONSOLE_DIALOG: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/views/WorkflowCreateDialog.tsx"
+        "/../../frontend/src/views/WorkflowCreateDialog.tsx"
     ));
     const CONSOLE_DIALOG_PATH: &str = "frontend/src/views/WorkflowCreateDialog.tsx";
 
@@ -5084,7 +5111,7 @@ to = "done"
     /// destination kinds.
     const CONSOLE_API: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/frontend/src/api/workflows.ts"
+        "/../../frontend/src/api/workflows.ts"
     ));
     const CONSOLE_API_PATH: &str = "frontend/src/api/workflows.ts";
 

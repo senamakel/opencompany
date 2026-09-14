@@ -10,11 +10,11 @@
 # why a hardcoded copy could not survive a resync.
 #
 # This file exists because the block below was copied into four jobs of
-# `ci.yml` and a fifth in `release.yml`, ~340 lines apart in a file long enough
+# `ci.yml` and a fifth in the then release workflow, ~340 lines apart in a file long enough
 # that a reader edits one copy and never learns the others exist. The failure
 # that shape produces is the one issue #555 was filed for: a lane quietly not
 # doing what its siblings do, found late and by accident. It had already
-# happened by the time #592 was written — `release.yml` was missing
+# happened by the time #592 was written — the release copy was missing
 # `vendor/tinyhumans-sdk` and the nested `tinycortex` init entirely, and had
 # gone unnoticed only because that workflow is `workflow_dispatch`-only and had
 # never run.
@@ -30,7 +30,7 @@
 # `tinyhumans-sdk` is the case that catches people out: it is NOT one of the
 # `[patch]` targets. The vendored openhuman crate consumes it as a plain
 # unconditional path dependency because it is unpublished (issue #499). Absent
-# from this list, every lane breaks — which is exactly how `release.yml` came
+# from this list, every lane breaks — which is exactly how the release workflow came
 # to be latently broken.
 #
 # `tinycortex` in turn declares its own `tinyagents` path dependency, so its
@@ -90,7 +90,7 @@ fi
 # `error: pathspec 'vendor/tinydocs' did not match any file(s) known to git`
 # before a single crate compiled. The symmetric failure — upstream ADDS a crate
 # and the hardcoded list silently omits it — is the one that produced the
-# `release.yml` breakage described above, and it is the worse of the two
+# release-workflow breakage described above, and it is the worse of the two
 # because nothing fails until something needs the missing manifest.
 #
 # The `vendor/` prefix is the whole filter, and it is a STRUCTURAL one: those are

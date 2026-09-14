@@ -73,7 +73,7 @@ mode independent of a per-company manifest.
 
 The **packaged desktop app is the canonical layer-1 user.** It sets
 `auth_mode_override` to `AuthMode::None` on its own `AppConfig`
-(`src-tauri/src/embedded.rs`), which is what makes a desktop install a host
+(`crates/opencompany-app/src/embedded.rs`), which is what makes a desktop install a host
 with no login screen at all. It sets it there rather than writing
 `[users].mode = "none"` into the shipped preset manifests, and the difference
 is not stylistic: the override reaches *every* company on the data root,

@@ -7,7 +7,7 @@
 # directory, not ancestors. That makes "which app am I running" a property of
 # where the command was typed, and it is invisible in the command itself.
 #
-# The tree had two: the shell in `src-tauri/`, and a leftover console wrapper in
+# The tree had two: the shell in `crates/opencompany-app/`, and a leftover console wrapper in
 # `frontend/src-tauri/` that shared its `productName`. Because `tauri:dev` and
 # `tauri:build` live in `frontend/package.json`, and npm runs a script from its
 # manifest's own directory, `npm run tauri:dev` — the obvious way to start the
@@ -20,7 +20,7 @@
 #
 # Two rules, because either alone lets the failure back:
 #
-#   1. Exactly one `tauri.conf.json`, and it is `src-tauri/tauri.conf.json`. A
+#   1. Exactly one `tauri.conf.json`, and it is `crates/opencompany-app/tauri.conf.json`. A
 #      second app is the ambiguity itself; there is no version of it that is
 #      safe just because it is currently correct.
 #   2. No `package.json` script invokes the CLI without first establishing a
@@ -45,8 +45,8 @@ prune=(
 
 configs=$(find . -name tauri.conf.json "${prune[@]}" | sed 's|^\./||' | sort)
 
-if [ "${configs}" != "src-tauri/tauri.conf.json" ]; then
-    echo "assert-single-tauri-app: expected exactly one Tauri app, at src-tauri/tauri.conf.json." >&2
+if [ "${configs}" != "crates/opencompany-app/tauri.conf.json" ]; then
+    echo "assert-single-tauri-app: expected exactly one Tauri app, at crates/opencompany-app/tauri.conf.json." >&2
     echo "Found:" >&2
     echo "${configs}" | sed 's/^/    /' >&2
     echo >&2
@@ -65,7 +65,7 @@ fi
 # a package name like `@tauri-apps/cli` is not a command at all.
 #
 # A `cd` in an earlier segment clears the rest of the value: the whole point of
-# `cd ../src-tauri && … tauri build` is that it names the app, and a rule that
+# `cd ../crates/opencompany-app && … tauri build` is that it names the app, and a rule that
 # rejected it would have nothing left to recommend.
 unqualified_tauri() {
     local value=$1
@@ -125,13 +125,13 @@ while IFS= read -r manifest; do
         echo >&2
         echo "npm runs a script from the manifest's own directory, so an unqualified" >&2
         echo "'tauri' picks up whatever project sits beneath it. Name the directory:" >&2
-        echo '    "tauri:build": "npm run build && cd ../src-tauri && ../frontend/node_modules/.bin/tauri build"' >&2
+        echo '    "tauri:build": "npm run build && cd ../crates/opencompany-app && ../../frontend/node_modules/.bin/tauri build"' >&2
         status=1
     fi
 done < <(find . -name package.json "${prune[@]}")
 
 if [ "${status}" -eq 0 ]; then
-    echo "assert-single-tauri-app: one Tauri app (src-tauri/), no unqualified CLI invocations."
+    echo "assert-single-tauri-app: one Tauri app (crates/opencompany-app/), no unqualified CLI invocations."
 fi
 
 exit "${status}"

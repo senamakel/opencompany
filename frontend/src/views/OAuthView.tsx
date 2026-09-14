@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openOutward } from "@/lib/external-links";
 import { Info, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
@@ -21,7 +22,10 @@ import {
   disconnectRouteFor,
   type GridProvider,
 } from "@/lib/provider-grid";
-import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
+import {
+  ProviderDetail,
+  type ConnectionSubject,
+} from "@/views/connections/ProviderDetail";
 import { grantNamespace } from "@/components/grant-namespace";
 import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
@@ -94,7 +98,9 @@ export function OAuthView({ client, company }: Props) {
   // toolkit slug (issue #404). `states` still decides *whether* a provider is
   // connected — this decides *what* is connected, which is what a revoke has to
   // be addressed to and what the detail view opens.
-  const [accounts, setAccounts] = useState<Record<string, ComposioConnectedAccount[]>>({});
+  const [accounts, setAccounts] = useState<
+    Record<string, ComposioConnectedAccount[]>
+  >({});
   // The slug of the provider whose detail view is open, or `null`. A slug rather
   // than the row itself, so the open panel re-derives from `providers` after a
   // refresh instead of showing a snapshot of the state before the revoke.
@@ -136,7 +142,9 @@ export function OAuthView({ client, company }: Props) {
     ]);
     setAccounts(
       Object.fromEntries(
-        rows.filter((r) => r.accounts?.length).map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
+        rows
+          .filter((r) => r.accounts?.length)
+          .map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
       ),
     );
     // Bumped here rather than on the success path: the account-choice section
@@ -186,7 +194,10 @@ export function OAuthView({ client, company }: Props) {
    * happened. Comparing ids answers both cases with one rule, since the first
    * connect starts from an empty set.
    */
-  async function connectComposio(p: { providerId: string; label: string }, toolkit: string) {
+  async function connectComposio(
+    p: { providerId: string; label: string },
+    toolkit: string,
+  ) {
     // A sign-in for this toolkit is already polling (it can have been started
     // from a different tile sharing the slug). Clear the flag we just set rather
     // than leaving this tile spinning on someone else's flow.
@@ -194,7 +205,11 @@ export function OAuthView({ client, company }: Props) {
       setBusy((b) => (b === p.providerId ? null : b));
       return;
     }
-    const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
+    const { connectUrl } = await startComposioAuthorize(
+      client,
+      company,
+      toolkit,
+    );
     // `noopener` keeps the Composio tab from reaching back through
     // `window.opener` — it is a third-party page carrying an OAuth flow, so it
     // stays. The cost is that the handle is ALWAYS null: with `noopener` (or
@@ -208,30 +223,51 @@ export function OAuthView({ client, company }: Props) {
     // and trading a real security property for a nicer error, which is the
     // wrong trade on a tab we hand an OAuth URL to. `ComposioSection.signIn`
     // opens the same URL the same way and likewise does not check.
-    window.open(connectUrl, "_blank", "noopener,noreferrer");
+    // The desktop shell first: a webview cannot create the tab this asks for,
+    // so `window.open` there opens nothing while the toast below and the poll
+    // both proceed — the operator is told to finish a sign-in on a page that
+    // never appeared. `openOutward` returns false in a browser, where the
+    // original call is still the right one.
+    if (!openOutward(connectUrl)) {
+      window.open(connectUrl, "_blank", "noopener,noreferrer");
+    }
     toast.message(`Complete ${p.label} sign-in in the new tab.`);
     // What was already there before the tab opened. Read from the page's own
     // state rather than re-fetched: it is the same list the operator is looking
     // at, and a fresh read here could race the sign-in they have already
     // completed in another tab.
-    const before = new Set((accounts[toolkitSlug(toolkit)] ?? []).map((a) => a.id));
-    const wasConnected = providers.some((row) => row.slug === toolkitSlug(toolkit) && row.connected);
+    const before = new Set(
+      (accounts[toolkitSlug(toolkit)] ?? []).map((a) => a.id),
+    );
+    const wasConnected = providers.some(
+      (row) => row.slug === toolkitSlug(toolkit) && row.connected,
+    );
     const deadline = Date.now() + 120_000;
     const poll = async () => {
       delete pollTimers.current[toolkit];
       if (Date.now() > deadline) {
         setBusy((b) => (b === p.providerId ? null : b));
-        toast.message(`${p.label} sign-in timed out. Try again if it didn't complete.`);
+        toast.message(
+          `${p.label} sign-in timed out. Try again if it didn't complete.`,
+        );
         return;
       }
       try {
         const rows = await listComposioConnections(client, company);
-        const row = rows.find((r) => r.toolkit.toLowerCase() === toolkit.toLowerCase());
+        const row = rows.find(
+          (r) => r.toolkit.toLowerCase() === toolkit.toLowerCase(),
+        );
         // An id we had not seen settles it. Falling back to `connected` covers a
         // host predating the `accounts` field, where the first connect is the
         // only one this poll can observe at all.
-        const arrived = row?.accounts?.some((a) => a.connected && !before.has(a.id)) === true;
-        if (arrived || (row?.accounts === undefined && row?.connected === true && !wasConnected)) {
+        const arrived =
+          row?.accounts?.some((a) => a.connected && !before.has(a.id)) === true;
+        if (
+          arrived ||
+          (row?.accounts === undefined &&
+            row?.connected === true &&
+            !wasConnected)
+        ) {
           setBusy((b) => (b === p.providerId ? null : b));
           toast.success(`Connected ${p.label}.`);
           // Re-read the host's reconciled view so the tile flips to connected.
@@ -297,11 +333,18 @@ export function OAuthView({ client, company }: Props) {
    * it answered 200, the toast said "Disconnected Gmail", and Gmail was still
    * connected on the next refresh.
    */
-  async function disconnectAccount(p: GridProvider, account: ComposioConnectedAccount) {
+  async function disconnectAccount(
+    p: GridProvider,
+    account: ComposioConnectedAccount,
+  ) {
     if (busy) return;
     setBusy(p.providerId);
     try {
-      const { note } = await disconnectComposioConnection(client, company, account.id);
+      const { note } = await disconnectComposioConnection(
+        client,
+        company,
+        account.id,
+      );
       // The host's own words rather than ours: it is the side that knows what a
       // revoke reached, and restating it here is a second place to drift from
       // what actually happened.
@@ -368,7 +411,8 @@ export function OAuthView({ client, company }: Props) {
   // up offering a Connect that could only 400.
   const platformManaged =
     load === "ready" &&
-    (Object.values(states).some((s) => s.credentialSource === "attested") || attested);
+    (Object.values(states).some((s) => s.credentialSource === "attested") ||
+      attested);
 
   // The routing facts, narrowed out of the status the page already holds.
   const reach: ComposioReach | null = useMemo(
@@ -398,7 +442,14 @@ export function OAuthView({ client, company }: Props) {
         platformManaged,
         accounts,
       ),
-    [status?.effectiveCatalog, extraToolkits, states, reach, platformManaged, accounts],
+    [
+      status?.effectiveCatalog,
+      extraToolkits,
+      states,
+      reach,
+      platformManaged,
+      accounts,
+    ],
   );
 
   // Re-derived from the grid every render, so the open panel reflects the last
@@ -428,7 +479,8 @@ export function OAuthView({ client, company }: Props) {
           provider: openedProvider,
           noCredential: status?.credentialSource === "none",
           onConnectAnother: (p) => void connect(p),
-          onDisconnectAccount: (p, account) => void disconnectAccount(p, account),
+          onDisconnectAccount: (p, account) =>
+            void disconnectAccount(p, account),
         };
 
   // Counted off the rendered grid, not off the raw host rows. The badge used to
@@ -446,8 +498,8 @@ export function OAuthView({ client, company }: Props) {
         width="full"
         description={
           <>
-            The third-party accounts your company signs in to and acts through. It only uses
-            what you connect.
+            The third-party accounts your company signs in to and acts through.
+            It only uses what you connect.
           </>
         }
         trailing={
@@ -460,10 +512,13 @@ export function OAuthView({ client, company }: Props) {
         {load === "unavailable" && (
           <Alert>
             <Info className="size-4" />
-            <AlertTitle>OAuth connections aren&apos;t wired on this host yet</AlertTitle>
+            <AlertTitle>
+              OAuth connections aren&apos;t wired on this host yet
+            </AlertTitle>
             <AlertDescription>
-              The catalog below shows what your company can connect once the host exposes its OAuth
-              endpoints. Connecting is disabled until then.
+              The catalog below shows what your company can connect once the
+              host exposes its OAuth endpoints. Connecting is disabled until
+              then.
             </AlertDescription>
           </Alert>
         )}
@@ -473,9 +528,10 @@ export function OAuthView({ client, company }: Props) {
             <ShieldCheck className="size-4" />
             <AlertTitle>Connections are managed by the platform</AlertTitle>
             <AlertDescription>
-              This instance signs in with its own platform identity, so there is no provider key to
-              register here and nothing stored on this instance. Connect a provider from the
-              platform and it shows up here.
+              This instance signs in with its own platform identity, so there is
+              no provider key to register here and nothing stored on this
+              instance. Connect a provider from the platform and it shows up
+              here.
             </AlertDescription>
           </Alert>
         )}
@@ -483,11 +539,14 @@ export function OAuthView({ client, company }: Props) {
         {!canManage && (
           <Alert data-testid="connections-read-only">
             <Info className="size-4" />
-            <AlertTitle>Only an admin can change what this company connects through</AlertTitle>
+            <AlertTitle>
+              Only an admin can change what this company connects through
+            </AlertTitle>
             <AlertDescription>
-              A connection belongs to the company — it is the account your agents act
-              through — so an admin manages it. You can see everything that is wired here; ask an
-              admin to add, change or remove one.
+              A connection belongs to the company — it is the account your
+              agents act through — so an admin manages it. You can see
+              everything that is wired here; ask an admin to add, change or
+              remove one.
             </AlertDescription>
           </Alert>
         )}

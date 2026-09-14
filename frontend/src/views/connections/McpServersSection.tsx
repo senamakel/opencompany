@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openOutward } from "@/lib/external-links";
 import {
   AlertTriangle,
   Check,
@@ -181,7 +182,12 @@ interface Props {
  * keys, `/connect` and `/disconnect` routes), which crashed on open — a second
  * surface is how the two came to disagree, so there is one (issue #414).
  */
-export function McpServersSection({ client, company, canManage, chrome = "inline" }: Props) {
+export function McpServersSection({
+  client,
+  company,
+  canManage,
+  chrome = "inline",
+}: Props) {
   const [load, setLoad] = useState<McpLoad>("loading");
   // Whether the agent-side MCP bridge is compiled into this host (issue #567).
   // Starts `unknown` so nothing is claimed before the capability read lands.
@@ -274,7 +280,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       // failure. Anything else (offline, 5xx, a body that wasn't the list the
       // route promises) means we do not know what this company has, and saying
       // "no MCP here" would be a claim we cannot make (issue #414).
-      setLoad(err instanceof ApiError && err.status === 404 ? "unavailable" : "error");
+      setLoad(
+        err instanceof ApiError && err.status === 404 ? "unavailable" : "error",
+      );
     }
   }, [client, company]);
 
@@ -339,8 +347,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         endpoint: endpoint.trim(),
         token: token.trim() || undefined,
         authKind,
-        headerName: authKind === "header" ? authFieldName.trim() || undefined : undefined,
-        paramName: authKind === "query_param" ? authFieldName.trim() || undefined : undefined,
+        headerName:
+          authKind === "header" ? authFieldName.trim() || undefined : undefined,
+        paramName:
+          authKind === "query_param"
+            ? authFieldName.trim() || undefined
+            : undefined,
       });
       // A probe that lands "needs config" or "error" is NOT a rollback — the
       // server is added — but surface it inline so the operator acts on it.
@@ -369,7 +381,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       await refresh();
     } catch (err) {
       // Persistent, not a toast: the operator must see why the add failed.
-      setAddError(err instanceof ApiError ? err.message : "Couldn't add the server.");
+      setAddError(
+        err instanceof ApiError ? err.message : "Couldn't add the server.",
+      );
     } finally {
       setBusy(null);
     }
@@ -383,9 +397,13 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       setTested((t) => ({ ...t, [server.name]: health }));
     } catch (err) {
       if (err instanceof ApiError && err.code === "not_wired") {
-        toast.message("Live testing isn't enabled in this build (the agent harness is off).");
+        toast.message(
+          "Live testing isn't enabled in this build (the agent harness is off).",
+        );
       } else {
-        toast.error(err instanceof ApiError ? err.message : "Couldn't test the server.");
+        toast.error(
+          err instanceof ApiError ? err.message : "Couldn't test the server.",
+        );
       }
     } finally {
       setBusy(null);
@@ -423,7 +441,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       await refresh();
       await test(server);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Couldn't save the token.");
+      toast.error(
+        err instanceof ApiError ? err.message : "Couldn't save the token.",
+      );
     } finally {
       setBusy(null);
     }
@@ -436,8 +456,17 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     if (busy || pollTimers.current[server.name] !== undefined) return;
     setBusy(server.name);
     try {
-      const { authorizeUrl } = await startMcpOAuth(client, company, server.name);
-      window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+      const { authorizeUrl } = await startMcpOAuth(
+        client,
+        company,
+        server.name,
+      );
+      // See `OAuthView`: in the desktop shell a webview cannot create this tab,
+      // so the authorization page never opens while the toast and the poll
+      // below both carry on as though it had.
+      if (!openOutward(authorizeUrl)) {
+        window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+      }
       toast.message(`Complete sign-in for ${server.name} in the new tab.`);
       // Poll for completion for up to ~2 minutes; stop as soon as it's healthy.
       const deadline = Date.now() + 120_000;
@@ -469,14 +498,24 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
           // Ignore transient probe errors while the operator finishes sign-in.
         }
         if (unmounted.current) return;
-        pollTimers.current[server.name] = window.setTimeout(() => void poll(), 2_000);
+        pollTimers.current[server.name] = window.setTimeout(
+          () => void poll(),
+          2_000,
+        );
       };
-      pollTimers.current[server.name] = window.setTimeout(() => void poll(), 2_000);
+      pollTimers.current[server.name] = window.setTimeout(
+        () => void poll(),
+        2_000,
+      );
     } catch (err) {
       if (err instanceof ApiError && err.code === "not_wired") {
-        toast.message("OAuth sign-in isn't enabled in this build (the agent harness is off).");
+        toast.message(
+          "OAuth sign-in isn't enabled in this build (the agent harness is off).",
+        );
       } else {
-        toast.error(err instanceof ApiError ? err.message : "Couldn't start sign-in.");
+        toast.error(
+          err instanceof ApiError ? err.message : "Couldn't start sign-in.",
+        );
       }
     } finally {
       setBusy(null);
@@ -490,7 +529,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       await updateMcpServer(client, company, server.name, { enabled });
       await refresh();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Couldn't update the server.");
+      toast.error(
+        err instanceof ApiError ? err.message : "Couldn't update the server.",
+      );
     } finally {
       setBusy(null);
     }
@@ -513,7 +554,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
    */
   async function remove(server: McpServer) {
     if (busy) return;
-    const removal = mcpRowControls(server, tested[server.name] ?? server.health).removal;
+    const removal = mcpRowControls(
+      server,
+      tested[server.name] ?? server.health,
+    ).removal;
     if (removal.kind === "none") return;
     setBusy(server.name);
     try {
@@ -528,7 +572,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       if (err instanceof ApiError && err.code === "not_wired") {
         toast.message(REGISTRY_UNWIRED_NOTICE);
       } else {
-        toast.error(err instanceof ApiError ? err.message : "Couldn't remove the server.");
+        toast.error(
+          err instanceof ApiError ? err.message : "Couldn't remove the server.",
+        );
       }
     } finally {
       setBusy(null);
@@ -548,7 +594,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
    * a server that answers "needs a credential" has told the operator exactly
    * what to do next.
    */
-  async function lifecycle(server: McpServer, direction: "connect" | "disconnect") {
+  async function lifecycle(
+    server: McpServer,
+    direction: "connect" | "disconnect",
+  ) {
     if (busy || !server.serverId) return;
     setBusy(server.name);
     try {
@@ -591,13 +640,18 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     if (!server.qualifiedName) {
       setEnvFields({
         kind: "failed",
-        message: "This install doesn't name a directory entry, so its credential fields are unknown.",
+        message:
+          "This install doesn't name a directory entry, so its credential fields are unknown.",
       });
       return;
     }
     setEnvFields({ kind: "loading" });
     try {
-      const detail = await getMcpRegistryEntry(client, company, server.qualifiedName);
+      const detail = await getMcpRegistryEntry(
+        client,
+        company,
+        server.qualifiedName,
+      );
       setEnvFields({ kind: "ready", keys: detail.requiredEnvKeys });
     } catch (err) {
       const outage = registryOutage(err);
@@ -630,14 +684,23 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     setBusy(server.name);
     setEnvError(null);
     try {
-      const res = await updateMcpRegistryEnv(client, company, server.serverId, envDraft);
+      const res = await updateMcpRegistryEnv(
+        client,
+        company,
+        server.serverId,
+        envDraft,
+      );
       const after = res.test;
       if (after) setTested((t) => ({ ...t, [server.name]: after }));
       setEnvFor(null);
       setEnvDraft({});
       await refresh();
     } catch (err) {
-      setEnvError(err instanceof ApiError ? err.message : "Couldn't save those credentials.");
+      setEnvError(
+        err instanceof ApiError
+          ? err.message
+          : "Couldn't save those credentials.",
+      );
     } finally {
       setBusy(null);
     }
@@ -652,7 +715,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     setTools((t) => ({ ...t, [server.name]: { kind: "loading" } }));
     try {
       const list = await discoverMcpTools(client, company, server.name);
-      setTools((t) => ({ ...t, [server.name]: { kind: "ready", tools: list } }));
+      setTools((t) => ({
+        ...t,
+        [server.name]: { kind: "ready", tools: list },
+      }));
     } catch (err) {
       if (err instanceof ApiError && err.code === "not_wired") {
         setTools((t) => ({ ...t, [server.name]: { kind: "unwired" } }));
@@ -661,7 +727,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
           ...t,
           [server.name]: {
             kind: "error",
-            message: err instanceof ApiError ? err.message : "Discovery failed.",
+            message:
+              err instanceof ApiError ? err.message : "Discovery failed.",
           },
         }));
       }
@@ -683,7 +750,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         <Info className="size-4" />
         <AlertTitle>MCP servers aren&apos;t wired on this host</AlertTitle>
         <AlertDescription>
-          This host serves no MCP routes, so there is nothing to manage here yet.
+          This host serves no MCP routes, so there is nothing to manage here
+          yet.
         </AlertDescription>
       </Alert>
     );
@@ -702,14 +770,17 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
           promoting this one alone would read as though every section after it
           were a subsection of MCP Servers. */}
       <div className="flex items-center gap-2">
-        {chrome === "inline" && <Server className="size-4 text-muted-foreground" />}
+        {chrome === "inline" && (
+          <Server className="size-4 text-muted-foreground" />
+        )}
         <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           {chrome === "inline" ? "MCP Servers" : "Installed servers"}
         </h2>
       </div>
       <p className="text-sm text-muted-foreground">
-        Remote MCP tool servers your agents can call. Add an HTTP endpoint and (optionally) a
-        token — the token is stored securely and never shown again.
+        Remote MCP tool servers your agents can call. Add an HTTP endpoint and
+        (optionally) a token — the token is stored securely and never shown
+        again.
       </p>
 
       {/* Issue #567: this screen's routes ship in every build, the agent-side
@@ -719,12 +790,15 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       {bridge === "absent" && (
         <Alert data-testid="mcp-bridge-absent">
           <AlertTriangle className="size-4" />
-          <AlertTitle>No agent can use tool servers in this deployment</AlertTitle>
+          <AlertTitle>
+            No agent can use tool servers in this deployment
+          </AlertTitle>
           <AlertDescription>
-            The MCP bridge isn&apos;t compiled into this build, so servers added here are stored and
-            can be probed, but no agent ever receives their tools. The configuration survives —
-            rebuild this deployment with the <code className="font-mono">mcp</code> feature and the
-            servers below start reaching agents on the next turn.
+            The MCP bridge isn&apos;t compiled into this build, so servers added
+            here are stored and can be probed, but no agent ever receives their
+            tools. The configuration survives — rebuild this deployment with the{" "}
+            <code className="font-mono">mcp</code> feature and the servers below
+            start reaching agents on the next turn.
           </AlertDescription>
         </Alert>
       )}
@@ -734,10 +808,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         // and this host did not tell us that (issue #414).
         <Alert variant="destructive" data-testid="mcp-load-error">
           <AlertTriangle className="size-4" />
-          <AlertTitle>Couldn&apos;t load this company&apos;s MCP servers</AlertTitle>
+          <AlertTitle>
+            Couldn&apos;t load this company&apos;s MCP servers
+          </AlertTitle>
           <AlertDescription>
-            The host didn&apos;t answer with its server list, so what is installed is unknown.
-            Reload to try again.
+            The host didn&apos;t answer with its server list, so what is
+            installed is unknown. Reload to try again.
           </AlertDescription>
         </Alert>
       ) : load === "loading" ? (
@@ -746,7 +822,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
         <Card>
           <CardContent className="space-y-3">
             {servers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No MCP servers yet.</p>
+              <p className="text-sm text-muted-foreground">
+                No MCP servers yet.
+              </p>
             ) : (
               <ul className="divide-y divide-border">
                 {servers.map((server) => {
@@ -761,7 +839,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   // Hoisted out of the JSX so the direction stays narrowed:
                   // there is one place that decides connect-or-disconnect, and
                   // the button below reads it rather than re-testing it.
-                  const dial = controls.lifecycle === "none" ? null : controls.lifecycle;
+                  const dial =
+                    controls.lifecycle === "none" ? null : controls.lifecycle;
                   const badge = mcpSourceBadge(server.source);
                   const credential = credentialAffordance(health?.authHint, {
                     source: server.source,
@@ -788,7 +867,11 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                             // one; a decorative image, so it is named by the
                             // row beside it rather than by alt text repeating
                             // the server name a screen reader just read.
-                            <img src={server.iconUrl} alt="" className="size-full object-cover" />
+                            <img
+                              src={server.iconUrl}
+                              alt=""
+                              className="size-full object-cover"
+                            />
                           ) : (
                             <Server className="size-4 text-muted-foreground" />
                           )}
@@ -817,7 +900,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               {server.name}
                               <ChevronRight className="size-3.5 text-muted-foreground" />
                             </button>
-                            <Badge variant={badge.variant} data-testid="mcp-source-badge">
+                            <Badge
+                              variant={badge.variant}
+                              data-testid="mcp-source-badge"
+                            >
                               {badge.label}
                             </Badge>
                             <McpHealthBadge
@@ -831,12 +917,17 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                                 reverse. A disabled server therefore says so in
                                 words, where the other statuses are. */}
                             {controls.toggle && !server.enabled && (
-                              <Badge variant="outline" data-testid="mcp-disabled-badge">
+                              <Badge
+                                variant="outline"
+                                data-testid="mcp-disabled-badge"
+                              >
                                 disabled
                               </Badge>
                             )}
                           </div>
-                          <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {server.endpoint}
+                          </p>
                         </div>
                         <span className="flex shrink-0 items-center gap-0.5">
                           {/* Issue #1260: `oauth_required` means the server asked for
@@ -948,7 +1039,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               testId="mcp-toggle"
                               busy={busy === server.name}
                               disabled={busy !== null}
-                              onClick={() => void toggle(server, !server.enabled)}
+                              onClick={() =>
+                                void toggle(server, !server.enabled)
+                              }
                             />
                           )}
                           {controls.removal.kind !== "none" && canManage && (
@@ -987,34 +1080,53 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           >
                             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                             <span>
-                              No agent can reach this server — no tool grant covers{" "}
-                              <code className="font-mono">mcp:{server.name}</code>. Widen a company or
-                              per-agent tool grant, or this server is unused.
+                              No agent can reach this server — no tool grant
+                              covers{" "}
+                              <code className="font-mono">
+                                mcp:{server.name}
+                              </code>
+                              . Widen a company or per-agent tool grant, or this
+                              server is unused.
                             </span>
                           </p>
                         ) : (
-                          <p data-testid="mcp-reachability" className="text-xs text-muted-foreground">
+                          <p
+                            data-testid="mcp-reachability"
+                            className="text-xs text-muted-foreground"
+                          >
                             Reachable by:{" "}
                             <span className="font-medium text-foreground">
                               {/* Names, not ids (issue #931): an operator-added agent's
                                   id is a minted internal string and tells the reader
                                   nothing about who can reach the server. */}
-                              {server.reachableBy.map((agent) => agent.name).join(", ")}
+                              {server.reachableBy
+                                .map((agent) => agent.name)
+                                .join(", ")}
                             </span>
                           </p>
                         ))}
                       {health && health.status !== "ok" && health.message && (
-                        <p className="text-xs text-muted-foreground">{health.message}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {health.message}
+                        </p>
                       )}
                       {credentialFor === server.name && canManage && (
-                        <div className="flex items-end gap-2" data-testid="mcp-token-inline">
+                        <div
+                          className="flex items-end gap-2"
+                          data-testid="mcp-token-inline"
+                        >
                           <div className="flex-1 space-y-1">
-                            <Label htmlFor={`mcp-token-${server.name}`} className="text-xs">
+                            <Label
+                              htmlFor={`mcp-token-${server.name}`}
+                              className="text-xs"
+                            >
                               API token for {server.name}
                               {/* The value is write-only and unrecoverable, so
                                   say when saving it overwrites an existing one
                                   (issue #1464). */}
-                              {server.authConfigured ? " — replaces the stored credential" : ""}
+                              {server.authConfigured
+                                ? " — replaces the stored credential"
+                                : ""}
                             </Label>
                             <Input
                               id={`mcp-token-${server.name}`}
@@ -1022,9 +1134,12 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                               autoComplete="new-password"
                               placeholder="write-only"
                               value={credentialDraft}
-                              onChange={(e) => setCredentialDraft(e.target.value)}
+                              onChange={(e) =>
+                                setCredentialDraft(e.target.value)
+                              }
                               onKeyDown={(e) => {
-                                if (e.key === "Enter") void saveCredential(server);
+                                if (e.key === "Enter")
+                                  void saveCredential(server);
                                 if (e.key === "Escape") setCredentialFor(null);
                               }}
                             />
@@ -1052,17 +1167,24 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         </div>
                       )}
                       {envFor === server.name && canManage && (
-                        <div className="space-y-2 rounded-md bg-muted/40 p-2" data-testid="mcp-env-inline">
+                        <div
+                          className="space-y-2 rounded-md bg-muted/40 p-2"
+                          data-testid="mcp-env-inline"
+                        >
                           <p className="text-xs text-muted-foreground">
-                            Saving merges these values with the stored credentials and reconnects this server.
+                            Saving merges these values with the stored
+                            credentials and reconnects this server.
                           </p>
                           {envFields.kind === "loading" ? (
                             <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <Loader2 className="size-3 animate-spin" /> Reading this
-                              server&apos;s credential fields…
+                              <Loader2 className="size-3 animate-spin" />{" "}
+                              Reading this server&apos;s credential fields…
                             </p>
                           ) : envFields.kind === "failed" ? (
-                            <p className="text-xs text-destructive" data-testid="mcp-env-unavailable">
+                            <p
+                              className="text-xs text-destructive"
+                              data-testid="mcp-env-unavailable"
+                            >
                               {envFields.message}
                             </p>
                           ) : envFields.keys.length === 0 ? (
@@ -1085,42 +1207,55 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                                   placeholder="write-only"
                                   value={envDraft[key] ?? ""}
                                   onChange={(e) =>
-                                    setEnvDraft({ ...envDraft, [key]: e.target.value })
+                                    setEnvDraft({
+                                      ...envDraft,
+                                      [key]: e.target.value,
+                                    })
                                   }
                                 />
                               </div>
                             ))
                           )}
-                          {envError && <p className="text-xs text-destructive">{envError}</p>}
+                          {envError && (
+                            <p className="text-xs text-destructive">
+                              {envError}
+                            </p>
+                          )}
                           <div className="flex items-center gap-2">
-                            {envFields.kind === "ready" && envFields.keys.length > 0 && (
-                              <Button
-                                size="sm"
-                                data-testid="mcp-env-save"
-                                disabled={busy !== null}
-                                onClick={() => void saveEnvRotation(server, envFields.keys)}
-                              >
-                                {busy === server.name ? (
-                                  <Loader2 className="size-4 animate-spin" />
-                                ) : (
-                                  "Save"
-                                )}
-                              </Button>
-                            )}
+                            {envFields.kind === "ready" &&
+                              envFields.keys.length > 0 && (
+                                <Button
+                                  size="sm"
+                                  data-testid="mcp-env-save"
+                                  disabled={busy !== null}
+                                  onClick={() =>
+                                    void saveEnvRotation(server, envFields.keys)
+                                  }
+                                >
+                                  {busy === server.name ? (
+                                    <Loader2 className="size-4 animate-spin" />
+                                  ) : (
+                                    "Save"
+                                  )}
+                                </Button>
+                              )}
                             <Button
                               size="sm"
                               variant="ghost"
                               disabled={busy !== null}
                               onClick={() => setEnvFor(null)}
                             >
-                              {envFields.kind === "ready" && envFields.keys.length > 0
+                              {envFields.kind === "ready" &&
+                              envFields.keys.length > 0
                                 ? "Cancel"
                                 : "Close"}
                             </Button>
                           </div>
                         </div>
                       )}
-                      <McpToolsList state={tools[server.name] ?? { kind: "idle" }} />
+                      <McpToolsList
+                        state={tools[server.name] ?? { kind: "idle" }}
+                      />
                     </li>
                   );
                 })}
@@ -1177,7 +1312,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                     <select
                       id="mcp-auth-kind"
                       value={authKind}
-                      onChange={(e) => setAuthKind(e.target.value as McpAuthKind)}
+                      onChange={(e) =>
+                        setAuthKind(e.target.value as McpAuthKind)
+                      }
                       className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
                     >
                       <option value="bearer">Bearer token</option>
@@ -1188,12 +1325,16 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   {authKind !== "bearer" && (
                     <div className="space-y-1">
                       <Label htmlFor="mcp-auth-field" className="text-xs">
-                        {authKind === "header" ? "Header name" : "Parameter name"}
+                        {authKind === "header"
+                          ? "Header name"
+                          : "Parameter name"}
                       </Label>
                       <Input
                         id="mcp-auth-field"
                         value={authFieldName}
-                        placeholder={authKind === "header" ? "X-Api-Key" : "apiKey"}
+                        placeholder={
+                          authKind === "header" ? "X-Api-Key" : "apiKey"
+                        }
                         autoComplete="off"
                         onChange={(e) => setAuthFieldName(e.target.value)}
                       />
@@ -1201,7 +1342,9 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   )}
                   <div className="space-y-1">
                     <Label htmlFor="mcp-token" className="text-xs">
-                      {authKind === "bearer" ? "Token (optional)" : "Credential value"}
+                      {authKind === "bearer"
+                        ? "Token (optional)"
+                        : "Credential value"}
                     </Label>
                     <Input
                       id="mcp-token"
@@ -1227,7 +1370,8 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Adding saves the server now. {bridge === "absent"
+                  Adding saves the server now.{" "}
+                  {bridge === "absent"
                     ? "It stays unavailable to agents until this deployment is rebuilt with MCP support."
                     : "Agents pick up its tools on their next turn."}
                 </p>
@@ -1327,7 +1471,9 @@ function McpHealthBadge({
           ? { className: "text-status-blocked-text", Icon: AlertTriangle }
           : { className: "text-destructive", Icon: AlertTriangle };
   return (
-    <span className={`inline-flex items-center gap-1 text-xs ${tone.className}`}>
+    <span
+      className={`inline-flex items-center gap-1 text-xs ${tone.className}`}
+    >
       <tone.Icon className="size-3" /> {badge.label}
     </span>
   );
@@ -1346,7 +1492,8 @@ function McpToolsList({ state }: { state: ToolsState }) {
   if (state.kind === "unwired") {
     return (
       <p className="text-xs text-muted-foreground">
-        Live tool discovery isn&apos;t enabled in this build (the agent harness is off).
+        Live tool discovery isn&apos;t enabled in this build (the agent harness
+        is off).
       </p>
     );
   }
@@ -1354,7 +1501,11 @@ function McpToolsList({ state }: { state: ToolsState }) {
     return <p className="text-xs text-destructive">{state.message}</p>;
   }
   if (state.tools.length === 0) {
-    return <p className="text-xs text-muted-foreground">This server exposed no tools.</p>;
+    return (
+      <p className="text-xs text-muted-foreground">
+        This server exposed no tools.
+      </p>
+    );
   }
   return (
     <ul className="space-y-1 rounded-md bg-muted/40 p-2">

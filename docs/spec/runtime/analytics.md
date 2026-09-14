@@ -303,7 +303,7 @@ second hand-rolled reader is a bypass waiting to be found.
 
 Condition 1 is met in exactly one place in this repository: `TENANT_FEATURES` in
 `.github/workflows/deploy-staging.yml`, the hosted tenant image's feature set.
-Nothing else compiles the feature — not the desktop (`src-tauri/Cargo.toml`),
+Nothing else compiles the feature — not the desktop (`crates/opencompany-app/Cargo.toml`),
 not the default build, not any CI lane but the scoped analytics one. A hosted
 image whose feature list drops `analytics` reports nothing however the manager
 configures it, and says so at boot rather than failing quietly.

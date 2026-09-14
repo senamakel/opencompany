@@ -25,6 +25,12 @@
 //! log line, or agent-visible output: [`InferenceDecl`] derives no `Serialize`
 //! and its `Debug` redacts the credential.
 
+pub mod catalogue;
+pub mod dialect;
+pub mod probe;
+pub mod resolve;
+pub mod store;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +41,8 @@ use crate::company::types::{INFERENCE_PROVIDERS, Inference};
 use crate::error::OpenCompanyError;
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
+
+use self::store::provider_key_key;
 
 /// The [`SecretStore`](crate::ports::SecretStore) key holding the JSON runtime
 /// inference override (a [`RuntimeInference`] the console writes).
@@ -82,6 +90,14 @@ pub struct HarnessScope {
     pub id: String,
     /// Whether it is the company's default harness.
     pub is_default: bool,
+    /// Whether this harness declared `[harness.inference]` of its own.
+    ///
+    /// **Only the harness knows.** `built_in_lane` hands the resolver its own
+    /// section where it has one and the company's `[inference]` where it does
+    /// not, so by the time the value arrives the two are indistinguishable —
+    /// and the difference decides whether the company's provider list outranks
+    /// it. See [`resolve_effective_scoped`].
+    pub declares_own_inference: bool,
 }
 
 impl HarnessScope {
@@ -91,6 +107,7 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: true,
+            declares_own_inference: false,
         }
     }
 
@@ -99,7 +116,14 @@ impl HarnessScope {
         Self {
             id: id.into(),
             is_default: false,
+            declares_own_inference: false,
         }
+    }
+
+    /// Records that this harness declared `[harness.inference]` of its own.
+    pub fn declaring_own_inference(mut self, declares: bool) -> Self {
+        self.declares_own_inference = declares;
+        self
     }
 
     /// This scope's runtime-config secret key.
@@ -372,8 +396,35 @@ pub fn normalize_provider(provider: &str) -> &str {
 /// [`decl_for_probe`] passes the raw kind here; [`resolve_effective_scoped`]
 /// normalizes first, so runtime resolution of a legacy `managed` blob is
 /// unaffected.
-fn is_managed_choice(provider: &str) -> bool {
+pub fn is_managed_choice(provider: &str) -> bool {
     matches!(provider.trim(), LEGACY_MANAGED | "tinyhumans")
+}
+
+/// The slug the managed/TinyHumans provider's credential is keyed on.
+///
+/// `tinyhumans`, not `openrouter`, even though [`normalize_provider`] folds the
+/// managed kind onto `openrouter` for endpoint resolution. The two answer
+/// different questions: the kind says *what shape of API this is*, the slug says
+/// *whose account this is*. Keying the managed credential on `openrouter` would
+/// put a TinyHumans key in the slot a real OpenRouter account belongs in, and a
+/// company that had both would have one.
+///
+/// Not to be confused with [`company_key::KEY_KEY`](crate::company::company_key)
+/// (`tinyhumans/key`), which is the company's **identity**. This is a slot for a
+/// key pasted specifically for inference; that is the account the company signs
+/// in as. They are consulted in that order and they are not the same thing.
+pub const MANAGED_SLUG: &str = "tinyhumans";
+
+/// Which `provider/<slug>/key` slot a provider kind's credential lives in.
+///
+/// One rule, used by the resolver and by the store's entry-zero reader, so the
+/// address the turn path reads and the address the console writes cannot drift.
+pub fn credential_slug(provider_raw: &str) -> &str {
+    if is_managed_choice(provider_raw) {
+        MANAGED_SLUG
+    } else {
+        normalize_provider(provider_raw)
+    }
 }
 
 /// OpenRouter's OpenAI-compatible base URL — used when the `openrouter`
@@ -692,15 +743,35 @@ pub fn decl_for_probe(
 /// come through here — it inherits the platform endpoint in
 /// [`resolve_endpoint`], which is the only place that distinction is made.
 ///
-/// `ollama` backstops to a local default; `openai_compatible` has no default
-/// (validation requires an explicit URL).
+/// `ollama` backstops to a local default; every other local runtime, and
+/// `openai_compatible`, has no default (validation requires an explicit URL).
+///
+/// ## Why the fallback is empty rather than OpenRouter
+///
+/// This used to end `_ => override_url.unwrap_or(OPENROUTER_BASE_URL)`, and
+/// `lmstudio` and `omlx` have no arm — so a decl for either that resolved
+/// without a base URL was handed **openrouter.ai**, carrying whatever key the
+/// operator typed for the machine on their desk. A local runtime's turns would
+/// have gone to a third party along with its credential.
+///
+/// The console's add path always writes a URL, so no traced path reached it. But
+/// a `_ =>` arm that defaults to a third-party endpoint is the wrong shape
+/// whatever today's callers happen to do: the blast radius is a credential
+/// leaving the host, and the next caller is one refactor away. An empty string
+/// fails loudly and locally instead — the same answer `openai_compatible`
+/// already gave, for the same reason.
+///
+/// `openrouter` keeps its default by naming itself, which is also what stops an
+/// unknown kind inheriting it by accident.
 pub fn effective_base_url(provider: &str, override_url: Option<&str>) -> String {
     let override_url = override_url.map(str::trim).filter(|s| !s.is_empty());
     match normalize_provider(provider) {
         "ollama" => override_url.unwrap_or(OLLAMA_DEFAULT_BASE_URL).to_string(),
-        "openai_compatible" => override_url.unwrap_or_default().to_string(),
-        // openrouter, and any unknown kind (which `resolve_effective` rejects).
-        _ => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
+        "openrouter" => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
+        // `openai_compatible`, `lmstudio`, `omlx`, and any unknown kind. None of
+        // them has a guessable endpoint, and guessing is how a local runtime's
+        // credential reached OpenRouter.
+        _ => override_url.unwrap_or_default().to_string(),
     }
 }
 
@@ -835,6 +906,221 @@ pub async fn load_key_scoped(
     Ok(String::new())
 }
 
+/// Reads **managed's** credential, and only managed's.
+///
+/// Same two addresses as [`load_inference_key_scoped`] — `provider/tinyhumans/key`
+/// then the legacy flat slot — with the gate the flat slot needs and the general
+/// reader cannot have: `inference/key` is one address two different rows read
+/// through, and for an upgraded company whose entry zero is a vendor account it
+/// holds that vendor's key. Without the gate, an explicit Managed route sent a
+/// BYOK credential to the platform URL, and the status and Test Managed made the
+/// same ownership mistake.
+///
+/// The write path has always gated on this; see
+/// [`store::legacy_slot_is_managed`].
+pub async fn load_managed_key(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<String> {
+    if let Some(SecretValue(raw)) = secrets
+        .get(company, &provider_key_key(MANAGED_SLUG))
+        .await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    // **The fallback is the *flat* slot, and only the default harness reads
+    // that.** For a named scope `load_key_scoped` answers
+    // `harness/<id>/inference/key`, which is that harness's own credential for
+    // whatever *it* declared — presenting it to the platform endpoint is the
+    // same ownership mistake as the BYOK one, a scope along. Managed still
+    // resolves for a named harness; it just resolves through the company
+    // account or the instance identity, which is what `managed_identity` does
+    // with an empty key.
+    if !scope.is_default {
+        return Ok(String::new());
+    }
+    if !store::legacy_slot_is_managed(company, secrets).await? {
+        return Ok(String::new());
+    }
+    load_key_scoped(company, secrets, None, scope).await
+}
+
+/// Reads the outbound inference credential for one provider slug.
+///
+/// ```text
+///   1. provider/<slug>/key    the address every provider's credential lives at
+///   2. inference/key          the legacy flat slot, read-only
+///   3. <manifest secret>      a commit-time key named by `[inference].api_key_secret`
+/// ```
+///
+/// Steps 1 and 2 are **the same meaning at two addresses**. Nothing writes step 2
+/// any more ([`store_provider_key`](super::inference::store::store_provider_key)
+/// clears it on the next save of that provider), so the fallback retires itself
+/// company by company and can be deleted outright once nothing reads it. That is
+/// lazy convergence rather than a migration: no flag day, and no half-migrated
+/// state on a store with no transaction.
+///
+/// **A named harness reads its own slot first.** Step 1 is company-wide, so for
+/// a harness with inference of its own it is a *different owner's* credential
+/// wearing the same slug: a company that connects OpenRouter would otherwise
+/// have its key substituted for the harness's, and a harness with its own
+/// `base_url` would present it to a different gateway. The convergence order is
+/// right for the company's own resolution and wrong one scope in, so the scope
+/// decides which of the two comes first. A named harness holding no key of its
+/// own still inherits the company's, which is what it did before harness scopes
+/// existed and what a harness that declared only a model expects.
+pub async fn load_inference_key_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    override_key: Option<&str>,
+    scope: &HarnessScope,
+) -> Result<String> {
+    load_inference_key_for(company, secrets, slug, override_key, scope, true).await
+}
+
+/// [`load_inference_key_scoped`], with the company-wide step made optional.
+///
+/// **A named harness that names its own endpoint must not borrow the company's
+/// credential.** The company slot holds a key for the company's own gateway;
+/// presenting it to a different one is the same mistake as managed reading a
+/// vendor's. Inheriting is right only where the harness changed something that
+/// is not the destination — a model, say — so the caller that knows which of
+/// those it is holding passes the answer in.
+pub async fn load_inference_key_for(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    slug: &str,
+    override_key: Option<&str>,
+    scope: &HarnessScope,
+    may_inherit_company_key: bool,
+) -> Result<String> {
+    if !scope.is_default {
+        let own = load_key_scoped(company, secrets, override_key, scope).await?;
+        if !own.trim().is_empty() {
+            return Ok(own);
+        }
+        if !may_inherit_company_key {
+            return Ok(String::new());
+        }
+    }
+    if let Some(SecretValue(raw)) = secrets.get(company, &provider_key_key(slug)).await?
+        && !raw.trim().is_empty()
+    {
+        return Ok(raw);
+    }
+    load_key_scoped(company, secrets, override_key, scope).await
+}
+
+/// Which step of the managed chain a request would actually resolve at.
+///
+/// The managed row on the console has to say this, and it has to say it
+/// honestly. The design this is ported from renders a permanent `Always on`
+/// badge, which is true **there** — they run the managed backend — and is a lie
+/// here: our managed tier needs a credential and can resolve to nothing. A row
+/// claiming availability while agents cannot think is the failure
+/// `CognitionState`'s five states exist to prevent.
+///
+/// Steps 3 and 4 are kept apart because they answer different questions for the
+/// operator: one bills the company's own account, the other bills whoever runs
+/// the server. Collapsing them into "on" hides the decision they would make.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedSource {
+    /// A key pasted for inference — `provider/tinyhumans/key`, or the legacy
+    /// `inference/key`. These are two addresses for one meaning.
+    ProviderKey,
+    /// The company's own TinyHumans account.
+    CompanyAccount,
+    /// This instance's identity — so the server's account pays.
+    Instance,
+    /// Nothing resolves. The managed brain is **not set up**.
+    None,
+}
+
+impl ManagedSource {
+    /// The stable wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderKey => "provider_key",
+            Self::CompanyAccount => "company_account",
+            Self::Instance => "instance",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether the managed brain can be reached at all.
+    pub fn resolves(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// [`ManagedSource`] from the three facts that decide it.
+///
+/// Pure, because it is a decision with four branches and every one of them is a
+/// different sentence on screen. The inputs are read where a store is available;
+/// the reasoning is here, where it can be tested with three booleans.
+pub fn managed_source(
+    inference_key_set: bool,
+    company_account: &Credential,
+    env_default: Option<&EnvDefault>,
+) -> ManagedSource {
+    if inference_key_set {
+        return ManagedSource::ProviderKey;
+    }
+    if matches!(company_account, Credential::Company(_)) {
+        return ManagedSource::CompanyAccount;
+    }
+    match env_default {
+        // `configured()` rather than presence: a projected-token source reports
+        // itself configured while its file can still yield nothing, and what
+        // decides availability is whether a value would reach the wire.
+        Some(env) if env.credential.configured() => ManagedSource::Instance,
+        _ => ManagedSource::None,
+    }
+}
+
+/// Steps 3 and 4 of the managed chain: the company's account identity, then this
+/// instance's.
+///
+/// **An identity flows to a surface only when the vendor at the other end is the
+/// identity's own vendor.** That is the whole safety property, and `proxied` is
+/// what enforces it: it is true exactly when the resolved endpoint is the
+/// platform's own, and false for OpenRouter, Anthropic, a custom endpoint or any
+/// other vendor. A `th_…` key presented as a bearer to `openrouter.ai` is a live
+/// bug in the credential-link path today, and this is the line that stops it
+/// being reproduced here.
+///
+/// `had_key` is the second gate: a key pasted for inference is a more specific
+/// answer than an identity, so it wins and this is not consulted at all.
+///
+/// A store read error **propagates**. An unreadable store means we do not know
+/// who this company is, and resolving that to the instance's identity would bill
+/// the company's thinking to the server's account, invisibly.
+async fn managed_identity(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    resolved: Credential,
+    proxied: bool,
+    had_key: bool,
+) -> Result<Credential> {
+    if !proxied || had_key {
+        return Ok(resolved);
+    }
+    Ok(
+        match crate::company::company_key::load(company, secrets).await? {
+            // The company's own TinyHumans account. Setting it used to move only
+            // the app connections and leave every agent turn on whoever runs the
+            // server — the expensive half, with nothing on screen saying so.
+            company_key @ Credential::Company(_) => company_key,
+            // Nothing of the company's own: the instance identity that
+            // `resolve_endpoint` already put here, or nothing at all.
+            _ => resolved,
+        },
+    )
+}
+
 /// Writes the company's outbound inference credential (write-only intake).
 pub async fn store_key(company: &CompanyId, secrets: &dyn SecretStore, key: &str) -> Result<()> {
     store_key_scoped(company, secrets, key, &HarnessScope::default()).await
@@ -875,10 +1161,11 @@ pub async fn key_configured(
 
 /// Resolves a company's *effective* inference configuration.
 ///
-/// Precedence is **runtime > manifest > env-default**. Returns `None` when no
-/// source configures inference at all — the caller then keeps the managed/echo
-/// brain. The single seam the harness builder and the ops route both use so the
-/// agent-facing resolution and the console's status view stay identical.
+/// Precedence is **provider list > runtime > manifest > env-default > a routing
+/// table that names `managed`**. Returns `None` when no source configures
+/// inference at all — the caller then keeps the managed/echo brain. The single
+/// seam the harness builder and the ops route both use so the agent-facing
+/// resolution and the console's status view stay identical.
 ///
 /// This re-reads the secret store on every call, which is what makes a console
 /// switch take effect on the agents' next turn with no rebuild.
@@ -915,13 +1202,275 @@ pub async fn resolve_effective_scoped(
     secrets: &dyn SecretStore,
     scope: &HarnessScope,
 ) -> Result<Option<InferenceDecl>> {
+    // 0. The provider list — what the console's Connected rows actually hold.
+    //
+    // **This is the seam the whole feature hung off and nobody connected.** The
+    // write routes populated `inference/providers`, the status route rendered
+    // it, and the resolver began at `inference/config` — so a company that added
+    // a provider through the console had configured its *display*, not itself,
+    // and the chat pane's "no model configured" was telling the truth.
+    //
+    // Entry zero is why this sits ABOVE the legacy read rather than replacing
+    // it: `inference/config` is the first element of this list, so a company
+    // that predates the list resolves through the same branch it always did —
+    // which is exactly what entry zero was designed to make true without a
+    // migration. The `EntryZero` arm below therefore falls through to step 1
+    // deliberately, so the legacy path keeps every rule it has (the proxy
+    // inheritance, the managed chain, `reject_unknown_provider`) rather than a
+    // reimplementation of them here.
+    //
+    // **Skipped for a named harness that configured itself.** The provider list
+    // is a company-level statement, and a `[harness.inference]` section or a
+    // `harness/<id>/inference/config` blob is a narrower one that predates it:
+    // `docs/spec/runtime/providers.md` has said runtime-then-manifest-then-
+    // default *within a harness* all along. Putting the list unconditionally on
+    // top inverted that, so connecting the company's first provider in the
+    // console silently re-pointed a harness that had its own account at the
+    // company's — and charged the wrong one, with nothing on any screen saying
+    // the harness's own section had stopped applying.
+    if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+        let providers = store::list_providers(company, secrets).await?;
+        if let Some(decl) = decl_for_primary(company, secrets, &providers).await? {
+            return Ok(Some(decl));
+        }
+    }
+
+    // The switched-off-Managed refusal used to sit here and now sits on the turn
+    // path alone: a *read* has to be able to describe the state that refuses a
+    // turn, and erroring here left a company with no page and therefore no
+    // switch to turn Managed back on with.
+    let legacy = resolve_legacy_scoped(company, manifest, env_default, secrets, scope).await?;
+    if legacy.is_some() {
+        return Ok(legacy);
+    }
+
+    // 4. The routing table naming `managed` — after the legacy chain's steps
+    //    1-3, and last of everything.
+    //
+    // **The branch whose absence put a working company on the echo brain.**
+    // Managed is the one inference source with no record in either place the two
+    // branches above read: it is not a row in `inference/providers` (it resolves
+    // through a credential chain rather than from a record), and a company that
+    // configured it through the console's Managed row wrote neither the legacy
+    // runtime blob nor a manifest `[inference]` block. Its credential is at
+    // `provider/tinyhumans/key` and its *choice* is in `inference/routes`.
+    //
+    // So on the reported company — one disabled provider, all four tiers routed
+    // to `managed`, a non-empty managed key — both branches above returned
+    // `None`, `RuntimeBuilder::build` read that as "nothing configured" and
+    // selected the offline echo brain. Restarting the host did not help, because
+    // a fresh boot ran this same computation and got the same answer. Meanwhile
+    // [`resolve_effective_for_tier`] resolved those rows to
+    // [`managed_decl`] perfectly well — the turn-time path knew, and the
+    // boot-time path had no way to ask.
+    //
+    // Tried **last**, so every company that resolves today resolves exactly
+    // where it did: this branch only turns a `None` into a `Some`.
+    //
+    // Gated on the Managed switch for the same reason it goes through
+    // `managed_decl`: [`resolve_effective_for_tier`] *refuses* an explicit
+    // `managed` route while the switch is off, so a boot that selected the
+    // harness brain on the strength of those rows would hand every turn to a
+    // resolver that errors. Off means off on both paths, or this branch
+    // reintroduces the drift it exists to close.
+    //
+    // A gate and not a refusal: this answers `Ok(None)`, so the status read
+    // still renders and still offers the switch. That distinction is the one
+    // the read-path guard got wrong.
+    let routes = store::load_routes(company, secrets).await?;
+    if resolve::any_route_is_managed(&routes) && store::managed_enabled(company, secrets).await? {
+        // Through `managed_decl` rather than a second opinion about the managed
+        // chain. It is the same function the routed turn path calls, so "does
+        // managed resolve for boot" and "what does a managed route resolve to"
+        // cannot drift — which is the failure mode that produced this bug and
+        // three of its siblings.
+        //
+        // The predicate is the resolved declaration's **own** credential, not a
+        // re-derivation: `managed_decl` always returns a decl (the platform
+        // endpoint exists regardless), and what separates a company that can
+        // think from one that cannot is whether a credential reached it through
+        // `managed_identity` — the pasted key, the company's TinyHumans account,
+        // or the instance identity. `Credential::None` means the operator picked
+        // managed and put nothing behind it, and that company belongs on the
+        // echo brain exactly as before.
+        let decl = managed_decl(company, secrets, env_default, scope).await?;
+        if decl.credential.configured() {
+            return Ok(Some(decl));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Refuses a fallback that rides the managed chain once Managed is switched off.
+///
+/// The switch is honoured on the explicit `managed` route in
+/// [`resolve_effective_for_tier`], but an **unset** row does not take that
+/// branch: it falls through here, and for a company whose legacy config or
+/// environment resolves to the platform it kept spending. The console says
+/// "Managed is switched off, so it is not a fallback. Its credential is
+/// untouched" — a sentence about exactly this path — so the page was making a
+/// promise the resolver did not keep.
+///
+/// **On the turn path only, never on a read.** It lived in
+/// [`resolve_effective_scoped`] for one commit, which every status read also
+/// goes through — so switching Managed off on a company with nothing else made
+/// `GET …/inference` fail, and the console could no longer render the switch
+/// needed to turn it back on. A refusal is a statement about a turn; a status
+/// read has to be able to *describe* the state that refuses one.
+///
+/// `is_proxied` is the marker because that is what riding the platform's
+/// endpoint on the platform's credential *is*; a company on its own key is not
+/// proxied whatever its provider is called.
+async fn refuse_a_managed_fallback_that_is_switched_off(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    decl: Option<InferenceDecl>,
+) -> Result<Option<InferenceDecl>> {
+    let Some(decl) = decl else {
+        return Ok(None);
+    };
+    if decl.is_proxied() && !store::managed_enabled(company, secrets).await? {
+        return Err(OpenCompanyError::Config(
+            "Managed is switched off and nothing else is connected, so there is \
+             nothing to think with. Switch it back on, or connect a provider in \
+             Settings → Inference."
+                .to_string(),
+        ));
+    }
+    Ok(Some(decl))
+}
+
+/// Whether a **named** harness holds inference configuration of its own.
+///
+/// Two tiers count, and they are the two `resolve_legacy_scoped` reads first: a
+/// blob in this harness's own `harness/<id>/inference/config` slot, and a
+/// `[harness.inference]` section in the manifest — which only the caller can
+/// report, because the section reaches the resolver already merged with the
+/// company's. Never true for the default harness: its "scoped" keys *are* the
+/// flat ones, and entry zero already carries them into the provider list.
+async fn harness_configures_itself(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<bool> {
+    if scope.is_default {
+        return Ok(false);
+    }
+    if scope.declares_own_inference {
+        return Ok(true);
+    }
+    Ok(load_runtime_config_scoped(company, secrets, scope)
+        .await?
+        .is_some())
+}
+
+/// The declaration the company's **primary** provider resolves to, if the list
+/// settles the question at all.
+///
+/// `None` means it does not, and the caller falls through to
+/// [`resolve_legacy_scoped`]: either the list is empty, or its primary is entry
+/// zero — which is the legacy blob wearing a provider record's clothes and has
+/// to resolve through the chain that owns it.
+///
+/// Takes the list rather than reading it, because both callers already hold one
+/// and a second read per turn buys nothing but a round trip.
+async fn decl_for_primary(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    providers: &[store::Provider],
+) -> Result<Option<InferenceDecl>> {
+    let marked = store::load_default_slug(company, secrets).await?;
+    match resolve::primary(providers, marked.as_deref()) {
+        Some(provider) if provider.origin == store::ProviderOrigin::Indexed => {
+            Ok(Some(decl_for_indexed(company, secrets, provider).await?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The declaration one **indexed** provider record resolves to.
+///
+/// Extracted because two callers need it and must not drift: the unrouted path
+/// above, which reaches it through the primary, and a routing row that names
+/// this provider by slug. A second copy of these six lines is a second opinion
+/// about which credential an added provider presents.
+async fn decl_for_indexed(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    provider: &store::Provider,
+) -> Result<InferenceDecl> {
+    let key = store::load_provider_key(company, secrets, provider).await?;
+    let had_key = !key.trim().is_empty();
+    // A provider the operator added names its own endpoint. It is a vendor
+    // account, never the platform proxy, so `proxied` is false — and that is
+    // what denies it both the instance identity and the company's, which is the
+    // safety property the credential chain is built on.
+    //
+    // **Stated, not derived.** This used to read `is_managed_choice(&kind)`,
+    // which is `false` for every kind an indexed record can hold — the add
+    // route only ever writes a catalogue slug or `custom`, and the edit route
+    // carries the kind across unchanged — so the two lines agreed by accident
+    // rather than by construction. Saying it outright means a future kind
+    // cannot quietly hand an operator-typed endpoint the platform's identity.
+    let credential = Credential::from_value(key);
+    let proxied = false;
+    let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+    Ok(InferenceDecl {
+        provider: normalize_provider(&provider.kind).to_string(),
+        base_url: provider.base_url.clone(),
+        models: provider.models.clone(),
+        source: InferenceSource::Runtime,
+        credential,
+        proxied,
+        vocabulary: None,
+    })
+}
+
+/// What a company resolves to **before** the provider list existed: the runtime
+/// blob, then the manifest, then the platform default.
+///
+/// Split out of [`resolve_effective_scoped`] rather than inlined because a
+/// routing row naming **entry zero** has to reach exactly this chain — entry
+/// zero *is* the legacy blob wearing a provider record's clothes, so resolving
+/// it through the record would drop the proxy inheritance, the managed chain and
+/// `reject_unknown_provider` that only live here.
+async fn resolve_legacy_scoped(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<Option<InferenceDecl>> {
     // 1. Runtime override (console) wins.
     if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
-        let key = load_key_scoped(company, secrets, None, scope).await?;
-        let (base_url, credential, proxied) =
-            resolve_endpoint(&provider, runtime.base_url.as_deref(), key, env_default);
+        let key = load_inference_key_for(
+            company,
+            secrets,
+            credential_slug(&runtime.provider),
+            None,
+            scope,
+            // It named its own endpoint, so the company's key is for somewhere
+            // else. See `load_inference_key_for`.
+            runtime.base_url.is_none(),
+        )
+        .await?;
+        let had_key = !key.trim().is_empty();
+        // The **raw** kind, not the normalized one. `normalize_provider` folds
+        // `managed` onto `openrouter`, and resolving through the normalized
+        // value skipped both managed branches — so a company that declared
+        // `managed` and stored a key had its requests sent to `openrouter.ai`
+        // carrying a TinyHumans token. `resolve_endpoint` consults
+        // `is_managed_choice` first and needs the word the operator chose.
+        let (base_url, credential, proxied) = resolve_endpoint(
+            &runtime.provider,
+            runtime.base_url.as_deref(),
+            key,
+            env_default,
+        );
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -938,10 +1487,34 @@ pub async fn resolve_effective_scoped(
         let provider =
             normalize_provider(manifest.provider.as_deref().unwrap_or_default()).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
-        let key =
-            load_key_scoped(company, secrets, manifest.api_key_secret.as_deref(), scope).await?;
+        let raw = manifest.provider.as_deref().unwrap_or_default();
+        let key = load_inference_key_for(
+            company,
+            secrets,
+            credential_slug(raw),
+            manifest.api_key_secret.as_deref(),
+            scope,
+            manifest.base_url.is_none(),
+        )
+        .await?;
+        let had_key = !key.trim().is_empty();
+        // The **normalized** kind here, unlike the runtime branch above, and the
+        // difference is who wrote the value. A runtime blob comes from the
+        // console, whose managed card has no URL field — so a `base_url` beside
+        // `managed` there is a stale value a previously-picked provider left in
+        // the form, and honouring it would send the managed probe somewhere the
+        // operator never chose. A manifest is hand-authored and committed:
+        // `provider = "managed"` with a `base_url` is a sentence somebody typed
+        // on purpose, usually a gateway in front of the platform, and silently
+        // redirecting it to the platform endpoint would be the same disregard in
+        // the opposite direction.
+        //
+        // The credential chain is unaffected either way: an explicit endpoint
+        // resolves `proxied = false`, which is exactly what denies it both the
+        // platform credential and the company identity. A gateway is a vendor.
         let (base_url, credential, proxied) =
             resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider,
             base_url,
@@ -964,9 +1537,31 @@ pub async fn resolve_effective_scoped(
     //    take that key, store it, report it as configured — and then never send
     //    it anywhere.
     if let Some(env) = env_default {
-        let key = load_key_scoped(company, secrets, None, scope).await?;
+        // **Managed's own slot first.** This branch *is* the managed path — a
+        // company that configured nothing, landing on the platform endpoint —
+        // and the console's Managed row writes `provider/tinyhumans/key`. Read
+        // only through `DEFAULT_PROVIDER`, that key was stored, reported as the
+        // step that answers, and then never sent anywhere: turns kept riding
+        // the instance identity while the page said they were billed to it.
+        //
+        // The old lookup stays as the fallback, because a company that has a
+        // key at the default provider's slot or the flat one is a company this
+        // already served and must keep serving.
+        let managed_key = load_managed_key(company, secrets, scope).await?;
+        let key = if managed_key.trim().is_empty() {
+            load_inference_key_scoped(company, secrets, DEFAULT_PROVIDER, None, scope).await?
+        } else {
+            managed_key
+        };
+        let had_key = !key.trim().is_empty();
         let (base_url, credential, proxied) =
             resolve_endpoint(DEFAULT_PROVIDER, None, key, Some(env));
+        // A company that has configured nothing still lands on the platform's
+        // own endpoint, so its account key is the right credential for it — and
+        // this is the case where the silent billing split hurt most: an operator
+        // set a company key, watched Composio move onto their account, and left
+        // every agent turn on the server's.
+        let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
         return Ok(Some(InferenceDecl {
             provider: DEFAULT_PROVIDER.to_string(),
             base_url,
@@ -979,6 +1574,173 @@ pub async fn resolve_effective_scoped(
     }
 
     Ok(None)
+}
+
+/// [`resolve_effective_scoped`] for the workload one turn is actually for.
+///
+/// **The routing table's only caller on the turn path.** Without it the Routing
+/// tab is a screen that persists choices and changes nothing: every row wrote
+/// `inference/routes`, the status route read it back, and the turn resolved
+/// through the primary regardless — so the value stuck across a reload while the
+/// turn kept reaching the provider and the model the operator had just moved off.
+/// A control that visibly fails is a bug; one that reports success and is inert
+/// is worse, because nothing about it looks wrong.
+///
+/// `tier` is the abstract tier the turn carries (`chat-v1`, …). A tier with no
+/// row of its own — anything outside
+/// [`ROUTABLE_WORKLOADS`](resolve::ROUTABLE_WORKLOADS) — resolves exactly as it
+/// did before routes existed, rather than acquiring a route by accident or
+/// failing closed for want of one.
+///
+/// ## Why a route fails closed and an unset row does not
+///
+/// [`Resolution::Missing`](resolve::Resolution::Missing) and
+/// [`Disabled`](resolve::Resolution::Disabled) become errors here. An unset
+/// workload falls back to the primary because nobody chose anything for it; a
+/// route is a choice with a workload attached, and silently spending it on a
+/// different account is the failure the explicit default marker exists to
+/// prevent, wearing a different hat.
+pub async fn resolve_effective_for_tier(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+    tier: &str,
+) -> Result<Option<InferenceDecl>> {
+    let Some(workload) = resolve::Workload::from_tier(tier) else {
+        // A tier with no row of its own still resolves for a *turn*, so the
+        // switch applies to it as much as to a routable one.
+        let decl = resolve_effective_scoped(company, manifest, env_default, secrets, scope).await?;
+        return refuse_a_managed_fallback_that_is_switched_off(company, secrets, decl).await;
+    };
+    let providers = store::list_providers(company, secrets).await?;
+    let routes = store::load_routes(company, secrets).await?;
+
+    match resolve::provider_for_workload(workload, &routes, &providers) {
+        // Unset. The whole existing chain, unchanged — which is what keeps a
+        // company that has never opened the Routing tab resolving exactly where
+        // it always did.
+        //
+        // Same carve-out as `resolve_effective_scoped` step 0, for the same
+        // reason: an unset row is not a choice, so it must not outrank a named
+        // harness's own `[harness.inference]` or scoped runtime blob. A row
+        // that *is* set outranks both — that one is a choice, made here.
+        resolve::Resolution::Primary => {
+            let primary =
+                if scope.is_default || !harness_configures_itself(company, secrets, scope).await? {
+                    decl_for_primary(company, secrets, &providers).await?
+                } else {
+                    None
+                };
+            match primary {
+                Some(decl) => Ok(Some(decl)),
+                None => {
+                    let fallback =
+                        resolve_legacy_scoped(company, manifest, env_default, secrets, scope)
+                            .await?;
+                    refuse_a_managed_fallback_that_is_switched_off(company, secrets, fallback).await
+                }
+            }
+        }
+        // `managed` is a word in the route grammar, not a provider slug — it is
+        // what the Managed mode button writes into every row. Read as a slug it
+        // names nothing and the workload would fail closed against a provider
+        // the operator never had.
+        //
+        // Its switch is honoured **here**, on the turn path, and not only in the
+        // status the console renders. A row that is switched off and still
+        // billed is the same defect the routing table itself was added to fix,
+        // one provider along: the operator's statement was "stop spending on
+        // this", the page agreed, and the spend continued. It refuses in the
+        // same words a disabled provider does, because it is the same act.
+        resolve::Resolution::Managed => {
+            if !store::managed_enabled(company, secrets).await? {
+                return Err(OpenCompanyError::Config(format!(
+                    "the {} workload is routed to Managed, which is switched off. \
+                     Switch it back on, or point that workload somewhere else in \
+                     Settings → Inference → Routing.",
+                    workload.as_str()
+                )));
+            }
+            Ok(Some(
+                managed_decl(company, secrets, env_default, scope).await?,
+            ))
+        }
+        resolve::Resolution::Missing { workload, slug } => Err(OpenCompanyError::Config(format!(
+            "the {} workload is routed to `{slug}`, which this company does not have. \
+             Point it somewhere else in Settings → Inference → Routing.",
+            workload.as_str()
+        ))),
+        resolve::Resolution::Disabled { workload, slug } => Err(OpenCompanyError::Config(format!(
+            "the {} workload is routed to `{slug}`, which is switched off. \
+             Switch it back on, or point that workload somewhere else in \
+             Settings → Inference → Routing.",
+            workload.as_str()
+        ))),
+        resolve::Resolution::Resolved { provider, model } => {
+            let mut decl = match provider.origin {
+                store::ProviderOrigin::Indexed => {
+                    decl_for_indexed(company, secrets, provider).await?
+                }
+                // See [`resolve_legacy_scoped`]: entry zero is the legacy blob,
+                // and resolving it through the synthesized record would drop the
+                // rules only that chain holds.
+                //
+                // **At the company scope, whatever scope asked.** Entry zero
+                // *is* the flat `inference/config` — that is what the row is
+                // synthesised from and what its label names. Resolving it under
+                // a named harness read `harness/<id>/inference/config` instead,
+                // so a route shown as OpenRouter could run against that
+                // harness's Anthropic configuration and its credential: the
+                // explicit choice defeated, and the bill sent elsewhere.
+                store::ProviderOrigin::EntryZero => {
+                    let flat = HarnessScope::default_harness(&scope.id);
+                    match resolve_legacy_scoped(company, manifest, env_default, secrets, &flat)
+                        .await?
+                    {
+                        Some(decl) => decl,
+                        None => return Ok(None),
+                    }
+                }
+            };
+            if let Some(model) = model {
+                // The route's pinned model beats the provider's own tier map,
+                // and deliberately: the map is that provider's default for every
+                // workload, the route is this workload's choice. `model_for_tier`
+                // reads `models` first, so writing it here is the whole of it.
+                decl.models.insert(tier.to_string(), model);
+            }
+            Ok(Some(decl))
+        }
+    }
+}
+
+/// The declaration a route naming `managed` resolves to.
+///
+/// The platform endpoint and the managed credential chain — the company's own
+/// TinyHumans key when it has one, else the instance identity — reached through
+/// the same [`resolve_endpoint`] and [`managed_identity`] every other managed
+/// path uses, rather than by assembling the endpoint here.
+async fn managed_decl(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    env_default: Option<&EnvDefault>,
+    scope: &HarnessScope,
+) -> Result<InferenceDecl> {
+    let key = load_managed_key(company, secrets, scope).await?;
+    let had_key = !key.trim().is_empty();
+    let (base_url, credential, proxied) = resolve_endpoint(LEGACY_MANAGED, None, key, env_default);
+    let credential = managed_identity(company, secrets, credential, proxied, had_key).await?;
+    Ok(InferenceDecl {
+        provider: normalize_provider(LEGACY_MANAGED).to_string(),
+        base_url,
+        models: BTreeMap::new(),
+        source: InferenceSource::Runtime,
+        credential,
+        proxied,
+        vocabulary: None,
+    })
 }
 
 /// Fails a provider kind that is not in [`INFERENCE_PROVIDERS`].
@@ -2024,6 +2786,31 @@ mod tests {
         );
     }
 
+    /// The defect: `lmstudio` and `omlx` had no arm, so the `_ =>` fallback
+    /// handed a **local** runtime OpenRouter's URL — and the decl carries the
+    /// credential the operator typed for the machine on their desk. A local
+    /// runtime's turns, and its key, would have left the host.
+    #[test]
+    fn a_local_runtime_never_falls_back_to_a_third_party_endpoint() {
+        for kind in ["lmstudio", "omlx", "openai_compatible", "some-unknown-kind"] {
+            let resolved = effective_base_url(kind, None);
+            assert_ne!(
+                resolved, OPENROUTER_BASE_URL,
+                "{kind} must not inherit a third-party endpoint"
+            );
+            assert!(
+                resolved.is_empty(),
+                "{kind} has no guessable endpoint, so it must fail loudly: {resolved}"
+            );
+        }
+        // An override is still honoured, which is the whole of how these kinds
+        // are meant to be addressed.
+        assert_eq!(
+            effective_base_url("lmstudio", Some("http://localhost:1234/v1")),
+            "http://localhost:1234/v1"
+        );
+    }
+
     #[test]
     fn setup_accepts_the_localhost_spelling_local_model_apps_display() {
         assert_eq!(
@@ -2133,5 +2920,1307 @@ mod tests {
         assert_eq!(decl.base_url, "https://attacker.example/v1");
         assert!(!decl.is_proxied());
         assert_eq!(bearer(&decl).await, None);
+    }
+
+    // ---- the managed credential chain (issue #2266) -------------------------
+    //
+    // ```text
+    //   1. provider/tinyhumans/key   a key pasted specifically for inference
+    //   2. inference/key             the legacy address, read-only
+    //   3. tinyhumans/key            the company's account identity
+    //   4. instance identity         TINYHUMANS_TOKEN_FILE, else TINYHUMANS_API_KEY
+    //   5. nothing                   fail closed
+    // ```
+    //
+    // Steps 3 and 4 apply **only** when the vendor at the other end is the
+    // identity's own vendor. The OpenRouter test below is the important one.
+
+    async fn write(secrets: &MemSecrets, key: &str, value: &str) {
+        secrets
+            .set(&CompanyId::new("acme"), key, SecretValue(value.into()))
+            .await
+            .unwrap();
+    }
+
+    async fn resolve_managed(secrets: &MemSecrets) -> InferenceDecl {
+        let company = CompanyId::new("acme");
+        let config = RuntimeInference {
+            provider: "managed".into(),
+            base_url: None,
+            models: BTreeMap::new(),
+        };
+        save_runtime_config(&company, secrets, &config)
+            .await
+            .unwrap();
+        resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            secrets,
+        )
+        .await
+        .unwrap()
+        .expect("a managed config resolves")
+    }
+
+    #[tokio::test]
+    async fn managed_with_a_pasted_inference_key_uses_it() {
+        let secrets = MemSecrets::default();
+        write(
+            &secrets,
+            &store::provider_key_key(MANAGED_SLUG),
+            "sk-not-a-real-key",
+        )
+        .await;
+        // Present but outranked, so the ordering is actually exercised.
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert_eq!(decl.base_url, managed_env().base_url);
+    }
+
+    #[tokio::test]
+    async fn managed_falls_back_to_the_company_account_key_and_keeps_the_platform_endpoint() {
+        // The substance of #2266: a company key set in the console reached
+        // Composio and never reached inference, so setting it moved the app
+        // connections onto the company's account and left every agent turn —
+        // the expensive half — on whoever runs the server.
+        let secrets = MemSecrets::default();
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("th-account"));
+        // **Assert the endpoint, not only the bearer.** Sending a `th_…` key to
+        // openrouter.ai is the shipped bug this chain must not reproduce, and a
+        // test that checked the bearer alone is exactly how it shipped.
+        assert_eq!(decl.base_url, managed_env().base_url);
+        assert!(
+            !decl.base_url.contains("openrouter.ai"),
+            "{}",
+            decl.base_url
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_with_neither_uses_the_instance_identity() {
+        let secrets = MemSecrets::default();
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+        assert_eq!(decl.base_url, managed_env().base_url);
+    }
+
+    #[tokio::test]
+    async fn openrouter_never_receives_the_company_identity_or_the_instance_one() {
+        // THE test. An identity flows to a surface only when the vendor at the
+        // other end is the identity's own vendor: a `th_…` key means nothing to
+        // OpenRouter, and presenting it there is both a failed request and a
+        // credential disclosed to a third party.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(&secrets, crate::company::company_key::KEY_KEY, "th-account").await;
+
+        let config = RuntimeInference {
+            provider: "openrouter".into(),
+            // An explicit endpoint is what makes this unambiguously the tenant's
+            // own OpenRouter rather than the platform proxy in front of it.
+            base_url: Some(OPENROUTER_BASE_URL.into()),
+            models: BTreeMap::new(),
+        };
+        save_runtime_config(&company, &secrets, &config)
+            .await
+            .unwrap();
+        let decl = resolve_effective(
+            &company,
+            &Inference::default(),
+            Some(&managed_env()),
+            &secrets,
+        )
+        .await
+        .unwrap()
+        .expect("an openrouter config resolves");
+
+        assert_eq!(decl.base_url, OPENROUTER_BASE_URL);
+        assert!(!decl.is_proxied());
+        let presented = bearer(&decl).await;
+        assert_ne!(
+            presented.as_deref(),
+            Some("th-account"),
+            "the company identity leaked to a vendor"
+        );
+        assert_ne!(
+            presented.as_deref(),
+            Some("platform-key"),
+            "the instance identity leaked to a vendor"
+        );
+        assert_eq!(
+            presented, None,
+            "no credential at all is the correct answer here"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_company_reads_the_flat_slot_and_one_save_moves_it() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        write(&secrets, KEY_KEY, "sk-not-a-real-key").await;
+
+        let decl = resolve_managed(&secrets).await;
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key"),
+            "the legacy address is still read, so an untouched company keeps working"
+        );
+
+        // One save through the provider store converges the address.
+        let zero = store::list_providers(&company, &secrets).await.unwrap()[0].clone();
+        store::store_provider_key(&company, &secrets, &zero, "sk-not-a-real-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            secrets.get(&company, KEY_KEY).await.unwrap(),
+            Some(SecretValue(String::new())),
+            "and clears the old one, so no secret is orphaned"
+        );
+        assert_eq!(
+            secrets
+                .get(&company, &store::provider_key_key(MANAGED_SLUG))
+                .await
+                .unwrap(),
+            Some(SecretValue("sk-not-a-real-key".into()))
+        );
+    }
+
+    // ---- the managed row's honest state -------------------------------------
+
+    #[test]
+    fn managed_reports_which_step_of_the_chain_answers() {
+        // Not a boolean, and not "always on". The row that renders this used to
+        // claim permanent availability, inherited from a design where the same
+        // company runs the managed backend — here it needs a credential and can
+        // resolve to nothing.
+        let env = managed_env();
+        let company = Credential::from_company_key("th-account");
+
+        assert_eq!(
+            managed_source(true, &company, Some(&env)),
+            ManagedSource::ProviderKey,
+            "a key pasted for inference outranks everything below it"
+        );
+        assert_eq!(
+            managed_source(false, &company, Some(&env)),
+            ManagedSource::CompanyAccount,
+        );
+        assert_eq!(
+            managed_source(false, &Credential::None, Some(&env)),
+            ManagedSource::Instance,
+            "the server's account pays, and the row has to say so"
+        );
+        assert_eq!(
+            managed_source(false, &Credential::None, None),
+            ManagedSource::None,
+            "nothing resolves — not set up, and not a green badge"
+        );
+    }
+
+    #[test]
+    fn the_two_paying_states_are_not_collapsed() {
+        // An operator deciding whether to connect their account needs to know
+        // which one they are on. "On" for both hides the decision.
+        let env = managed_env();
+        assert_ne!(
+            managed_source(
+                false,
+                &Credential::from_company_key("th-account"),
+                Some(&env)
+            ),
+            managed_source(false, &Credential::None, Some(&env)),
+        );
+    }
+
+    #[test]
+    fn an_env_default_that_would_yield_nothing_is_not_availability() {
+        // `configured()` rather than presence: a projected-token source reports
+        // itself present while its file can still yield nothing, and what
+        // decides availability is whether a value would reach the wire.
+        let empty = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::None,
+        };
+        assert_eq!(
+            managed_source(false, &Credential::None, Some(&empty)),
+            ManagedSource::None
+        );
+    }
+
+    // ---- the provider list actually reaches the resolver ---------------------
+    //
+    // Every other test in this module seeds `inference/config` or exercises the
+    // store in isolation, which is exactly how a feature comes to be fully built
+    // on both sides and connected in neither: the write routes populated
+    // `inference/providers`, the status route rendered it, and nothing on the
+    // turn path ever read it. A company that added a provider through the
+    // console had configured its *display*, not its company — the chat pane said
+    // "no model configured" and was telling the truth.
+    //
+    // These write a provider through the store with NO legacy blob anywhere and
+    // assert a turn resolves to it.
+
+    async fn add_indexed(secrets: &MemSecrets, slug: &str, key: &str) {
+        let company = CompanyId::new("acme");
+        store::put_provider(
+            &company,
+            secrets,
+            store::ProviderDraft {
+                slug: slug.to_string(),
+                label: slug.to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: format!("https://{slug}.example/v1"),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key(slug),
+                SecretValue(key.to_string()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_provider_added_through_the_console_resolves_for_a_turn() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "acme", "sk-not-a-real-key").await;
+        // Deliberately no `inference/config`: this is what a company that only
+        // ever used the provider list looks like on disk.
+        assert!(
+            load_runtime_config(&company, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "the legacy blob must be absent for this test to mean anything"
+        );
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("a company with a provider resolves");
+        assert_eq!(decl.base_url, "https://acme.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert!(decl.key_configured());
+    }
+
+    #[tokio::test]
+    async fn the_marked_default_is_the_one_a_turn_reaches() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+
+        // No marker: list order, which is the behaviour that predates the marker.
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://first.example/v1");
+
+        store::set_default_slug(&company, &secrets, "second")
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decl.base_url, "https://second.example/v1",
+            "marking a default has to move where a turn actually goes, not just a badge"
+        );
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-2"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_provider_is_not_where_a_turn_goes() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "off", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "on", "sk-not-a-real-key-2").await;
+        store::set_enabled(&company, &secrets, "off", false)
+            .await
+            .unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://on.example/v1");
+    }
+
+    #[tokio::test]
+    async fn the_legacy_blob_still_wins_when_it_is_the_only_thing_there() {
+        // Entry zero sorts first in the list, so a company that had one provider
+        // before any of this existed keeps resolving exactly where it did. The
+        // whole entry-zero design exists to make that true without a migration.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openai_compatible".into(),
+                base_url: Some("https://legacy.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "sk-not-a-real-key")
+            .await
+            .unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://legacy.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key"));
+        assert_eq!(decl.source, InferenceSource::Runtime);
+    }
+
+    #[tokio::test]
+    async fn nothing_configured_still_resolves_to_nothing() {
+        // The list being empty must not become a way to resolve *something*.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // ---- the routing table actually reaches the resolver ---------------------
+    //
+    // The same shape as the block above, one layer along, and found the same
+    // way: the Routing tab wrote `inference/routes`, the status route rendered
+    // it, `provider_for_workload` decided over it in isolation — and the turn
+    // path never asked. Every row of that screen persisted, survived a reload,
+    // and changed nothing about where a turn went. A control that visibly fails
+    // is a bug; a control that reports success and is inert is a lie, and it is
+    // the harder one to find because nothing looks wrong.
+
+    /// The route a tier resolves to, as the wire model the plan would carry.
+    fn wire_model(decl: &InferenceDecl, tier: &str) -> String {
+        model_for_tier(tier, &decl.models, decl.vocabulary())
+    }
+
+    async fn route(secrets: &MemSecrets, tier: &str, raw: &str) {
+        let company = CompanyId::new("acme");
+        let mut routes = store::load_routes(&company, secrets).await.unwrap();
+        routes.insert(tier.to_string(), resolve::ProviderRef::parse(raw));
+        store::save_routes(&company, secrets, &routes)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_route_sends_its_workload_to_the_provider_and_model_it_names() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "chat-v1", "second:deepseek/deepseek-v4-flash").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a routed workload resolves");
+        assert_eq!(
+            decl.base_url, "https://second.example/v1",
+            "the route names the provider, so the turn goes there and not to the primary"
+        );
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-2"));
+        assert_eq!(
+            wire_model(&decl, "chat-v1"),
+            "deepseek/deepseek-v4-flash",
+            "the model the route pinned is the model that goes on the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_route_beats_the_default_providers_own_tier_map() {
+        // The sharpest form of the bug, and the one an operator hit: Use Your
+        // Own Models wrote `anthropic:claude-sonnet-5` into all four tiers, and
+        // the next turn sent `anthropic/claude-opus-5` to OpenRouter — neither
+        // their provider nor their model. The route was inert in both
+        // dimensions, and the two failures hid each other: with a route naming
+        // the provider that was already the default, "route honoured" and "route
+        // ignored" look identical. This asserts both halves at once by pointing
+        // the route at a provider that is *not* the marked default, and pinning
+        // a model the default's own tier map would answer differently.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        let mut openrouter_tiers = BTreeMap::new();
+        openrouter_tiers.insert("chat-v1".to_string(), "anthropic/claude-opus-5".to_string());
+        store::put_provider(
+            &company,
+            &secrets,
+            store::ProviderDraft {
+                slug: "openrouter".into(),
+                label: "OpenRouter".into(),
+                kind: "openrouter".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                models: openrouter_tiers,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key("openrouter"),
+                SecretValue("sk-not-a-real-key-or".into()),
+            )
+            .await
+            .unwrap();
+        store::put_provider(
+            &company,
+            &secrets,
+            store::ProviderDraft {
+                slug: "anthropic".into(),
+                label: "Anthropic".into(),
+                kind: "anthropic".into(),
+                base_url: "https://api.anthropic.com/v1".into(),
+                models: BTreeMap::new(),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(
+                &company,
+                &store::provider_key_key("anthropic"),
+                SecretValue("sk-not-a-real-key-ant".into()),
+            )
+            .await
+            .unwrap();
+        store::set_default_slug(&company, &secrets, "openrouter")
+            .await
+            .unwrap();
+        route(&secrets, "chat-v1", "anthropic:claude-sonnet-5").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("the routed workload resolves");
+        assert_eq!(
+            decl.base_url, "https://api.anthropic.com/v1",
+            "the route names anthropic, so the turn goes to anthropic and not to the default"
+        );
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-ant")
+        );
+        assert_eq!(
+            wire_model(&decl, "chat-v1"),
+            "claude-sonnet-5",
+            "the route's model beats the default provider's own tier map"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workload_with_no_route_still_falls_through_to_the_primary() {
+        // The other half of the property: pinning one row must not move the
+        // others. A fix that routed everything through the chat row would pass
+        // the test above and be worse than the bug.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "chat-v1", "second:deepseek/deepseek-v4-flash").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "reasoning-v1",
+        )
+        .await
+        .unwrap()
+        .expect("an unrouted workload resolves");
+        assert_eq!(decl.base_url, "https://first.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-1"));
+        assert_ne!(
+            wire_model(&decl, "reasoning-v1"),
+            "deepseek/deepseek-v4-flash",
+            "another row's pinned model must not leak onto this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_managed_resolves_through_the_managed_chain() {
+        // `managed` is a word in the route grammar, not a provider slug. Read as
+        // a slug it resolves to nothing and the workload fails closed — which is
+        // what the Managed mode button writes into every row.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "agentic-v1", "managed").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves");
+        assert!(decl.is_proxied(), "the managed route rides the platform");
+        assert_eq!(decl.base_url, "https://platform.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+    }
+
+    #[tokio::test]
+    async fn a_named_harness_that_configured_itself_outranks_the_company_provider_list() {
+        // `docs/spec/runtime/providers.md` has always said runtime, then
+        // manifest, then default — **within a harness**. Putting the company's
+        // provider list unconditionally above that inverted it, so connecting
+        // the company's first provider in the console silently re-pointed a
+        // harness with an account of its own at the company's, and charged it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+
+        // The default harness reads the company's list, which is the whole
+        // point of the list existing.
+        let default_scope = HarnessScope::default_harness("embedded");
+        let shared = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &default_scope,
+        )
+        .await
+        .unwrap()
+        .expect("the default harness resolves through the connected provider");
+        assert_eq!(shared.base_url, "https://first.example/v1");
+
+        // A named harness that declared `[harness.inference]` of its own does
+        // not. It resolves through what it declared.
+        let own = HarnessScope::named("deep").declaring_own_inference(true);
+        let mine =
+            resolve_effective_scoped(&company, &inference("openrouter"), None, &secrets, &own)
+                .await
+                .unwrap()
+                .expect("a harness with its own section resolves through it");
+        assert_ne!(
+            mine.base_url, "https://first.example/v1",
+            "the company's connected provider must not outrank this harness's own section"
+        );
+        assert_eq!(
+            mine.base_url, PLATFORM_BASE_URL,
+            "with a section of its own and no key in it, this harness rides the subscription"
+        );
+
+        // And a named harness that declared nothing still inherits the
+        // company's list — the carve-out is for a statement, not for a name.
+        let inherits = HarnessScope::named("shallow");
+        let theirs = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            None,
+            &secrets,
+            &inherits,
+        )
+        .await
+        .unwrap()
+        .expect("a harness with nothing of its own inherits");
+        assert_eq!(theirs.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_named_harness_reads_its_own_credential_before_the_company_wide_one() {
+        // Step 1 of the chain is company-wide, so for a harness with inference
+        // of its own it is a different owner's credential wearing the same
+        // slug. A company connecting OpenRouter would otherwise have its key
+        // substituted for the harness's — and a harness with its own base_url
+        // would present it to a different gateway.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let named = HarnessScope::named("deep");
+
+        secrets
+            .set(
+                &company,
+                &provider_key_key("openrouter"),
+                SecretValue("sk-company".into()),
+            )
+            .await
+            .unwrap();
+        // With nothing of its own, the harness inherits — which is what it did
+        // before harness scopes existed.
+        assert_eq!(
+            load_inference_key_scoped(&company, &secrets, "openrouter", None, &named)
+                .await
+                .unwrap(),
+            "sk-company"
+        );
+
+        store_key_scoped(&company, &secrets, "sk-deep", &named)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_inference_key_scoped(&company, &secrets, "openrouter", None, &named)
+                .await
+                .unwrap(),
+            "sk-deep",
+            "the harness's own key wins once it has one"
+        );
+        // And the company's own resolution is untouched by either.
+        assert_eq!(
+            load_inference_key_scoped(
+                &company,
+                &secrets,
+                "openrouter",
+                None,
+                &HarnessScope::default()
+            )
+            .await
+            .unwrap(),
+            "sk-company"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_never_reads_a_legacy_slot_that_belongs_to_a_vendor_account() {
+        // `inference/key` is one address with two possible owners. For a company
+        // upgraded from a BYOK config it holds that vendor's key, and reading it
+        // as managed's sent an OpenRouter credential to the platform URL — a
+        // credential presented to an account that does not own it.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        // Entry zero is a vendor account, with its key still in the flat slot.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(&company, KEY_KEY, SecretValue("sk-or-byok".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            load_managed_key(&company, &secrets, &HarnessScope::default())
+                .await
+                .unwrap(),
+            "",
+            "the vendor's key is not managed's to present"
+        );
+        // And the general reader still finds it for the row it belongs to.
+        assert_eq!(
+            load_inference_key_scoped(
+                &company,
+                &secrets,
+                "openrouter",
+                None,
+                &HarnessScope::default()
+            )
+            .await
+            .unwrap(),
+            "sk-or-byok"
+        );
+
+        // Same rule a scope along: a named harness's own slot holds that
+        // harness's credential for whatever it declared, which managed has no
+        // more claim on than it does on entry zero's.
+        let named = HarnessScope::named("deep");
+        store_key_scoped(&company, &secrets, "sk-deep-byok", &named)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_managed_key(&company, &secrets, &named).await.unwrap(),
+            "",
+            "a named harness's key is not managed's to present either"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_managed_key_on_a_fresh_company_is_what_its_turns_present() {
+        // The console's Managed row writes `provider/tinyhumans/key`, and the
+        // default branch read only `DEFAULT_PROVIDER`'s slot — so the key was
+        // stored, reported as the step that answers, and never sent anywhere.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("instance-identity"),
+        };
+
+        // Nothing configured: the instance identity is what answers.
+        let before = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the platform default resolves");
+        assert_eq!(bearer(&before).await.as_deref(), Some("instance-identity"));
+
+        secrets
+            .set(
+                &company,
+                &provider_key_key(MANAGED_SLUG),
+                SecretValue("sk-managed".into()),
+            )
+            .await
+            .unwrap();
+        let after = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("the platform default still resolves");
+        assert_eq!(
+            bearer(&after).await.as_deref(),
+            Some("sk-managed"),
+            "the key the operator pasted is the one the turn presents"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_managed_off_never_makes_the_status_unreadable() {
+        // The refusal is a statement about a *turn*. Putting it in the shared
+        // resolver put it in every status read too, so a company with nothing
+        // but managed could switch it off and then get a 500 from
+        // `GET …/inference` — no page, and therefore no switch to turn it back
+        // on with. A read has to be able to describe the state that refuses.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        let described = resolve_effective(&company, &inference("managed"), Some(&env), &secrets)
+            .await
+            .expect("a status read must still resolve");
+        assert!(
+            described.is_some(),
+            "the console has to render the row that switches it back on"
+        );
+
+        // And the turn path still refuses, which is the point of the switch.
+        let err = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a turn must not ride a switched-off managed");
+        assert!(err.to_string().contains("switched off"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unset_workload_stops_falling_back_to_managed_once_it_is_switched_off() {
+        // The unset row does not take the `Managed` branch — it falls through
+        // the primary to the legacy chain — so honouring the switch only there
+        // left a company whose environment resolves to the platform spending
+        // after it had been told to stop. The console's own sentence for this
+        // state is "Managed is switched off, so it is not a fallback."
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+
+        // On, and nothing connected: the platform is the fallback.
+        let decl = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("managed is the fallback while it is on");
+        assert!(decl.is_proxied());
+
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+        let err = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a switched-off managed must not keep serving unset workloads");
+        assert!(err.to_string().contains("switched off"), "{err}");
+
+        // A company on its own key is untouched by the switch: it was never
+        // riding the platform, so there is nothing here to refuse.
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        let own = resolve_effective_for_tier(
+            &company,
+            &inference("managed"),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a connected provider is not managed");
+        assert_eq!(own.base_url, "https://first.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_managed_fails_closed_once_managed_is_switched_off() {
+        // The switch is a statement about spend — "stop billing this account" —
+        // and a switch that only moves a badge on the settings page keeps
+        // billing it. That is the defect the routing table itself was added to
+        // fix, one provider along: the page agreed and the spend continued.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://platform.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "agentic-v1", "managed").await;
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .expect_err("a switched-off managed row must not keep serving turns");
+        let message = err.to_string();
+        assert!(message.contains("switched off"), "{message}");
+        assert!(message.contains("agentic"), "{message}");
+
+        // And switching it back on restores it, so the refusal is the switch
+        // rather than a route that has been broken by being touched.
+        store::set_managed_enabled(&company, &secrets, true)
+            .await
+            .unwrap();
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            Some(&env),
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .expect("a managed route resolves again once it is switched back on");
+        assert_eq!(decl.base_url, "https://platform.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_a_provider_that_is_gone_fails_closed() {
+        // An unset workload falls back, because nobody chose anything for it. A
+        // route is a choice with a workload attached, so it fails rather than
+        // quietly spending on an account the operator did not name.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        route(&secrets, "chat-v1", "ghost:gpt-5").await;
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .expect_err("a route naming nothing must not silently fall back");
+        let message = err.to_string();
+        assert!(message.contains("ghost"), "{message}");
+        assert!(message.contains("chat"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_a_switched_off_provider_fails_closed_too() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "parked", "sk-not-a-real-key-2").await;
+        store::set_enabled(&company, &secrets, "parked", false)
+            .await
+            .unwrap();
+        route(&secrets, "vision-v1", "parked").await;
+
+        let err = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "vision-v1",
+        )
+        .await
+        .expect_err("a parked route is a choice that no longer works");
+        assert!(err.to_string().contains("parked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn coding_reads_the_agentic_route_rather_than_one_of_its_own() {
+        // The alias, asserted on the path that matters. A coding turn arrives
+        // carrying `agentic-v1`, so this is really a statement about the tier
+        // the route is keyed on — and it is the reason routes are keyed on tiers
+        // rather than on workload names.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        route(&secrets, "agentic-v1", "second").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "agentic-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://second.example/v1");
+    }
+
+    // ---- a routed-managed company is a configured company ---------------------
+    //
+    // The third instance of tonight's shape, and the one that reached furthest:
+    // `resolve_effective_scoped` is what `RuntimeBuilder::build` asks "is
+    // anything configured at all", and it had exactly two branches — the
+    // provider list, then the legacy chain. Managed lives in neither. It has no
+    // row in `inference/providers` (it resolves through a credential chain, not
+    // a record), and a company configured through the console's Managed row
+    // writes neither the runtime blob nor a manifest block: its credential goes
+    // to `provider/tinyhumans/key` and its choice goes to `inference/routes`.
+    //
+    // So a company routing every tier to `managed`, with a managed key stored,
+    // resolved `None` — and got the offline echo brain. Restarting the host did
+    // not help, because a fresh boot ran the identical computation. The
+    // turn-time resolver knew how to resolve those rows the whole time.
+
+    /// Stores a managed credential at the address the console's managed key
+    /// route writes — the new per-provider slot, not the legacy flat one.
+    async fn managed_key(secrets: &MemSecrets, key: &str) {
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                &store::provider_key_key(MANAGED_SLUG),
+                SecretValue(key.to_string()),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_company_routed_to_managed_resolves_rather_than_landing_on_echo() {
+        // The reported company, reproduced exactly: one provider, switched off,
+        // every tier routed to `managed`, and a managed key stored.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "anthropic", "sk-not-a-real-key-anthropic").await;
+        store::set_enabled(&company, &secrets, "anthropic", false)
+            .await
+            .unwrap();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        // The unrouted resolver — the one `RuntimeBuilder::build` calls, and the
+        // one that used to answer `None` here and strand the company on echo.
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("a company routed to managed with a managed key is configured");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-managed"),
+            "the credential is the managed key, reached through the managed chain"
+        );
+        assert!(
+            decl.is_proxied(),
+            "managed rides the platform endpoint, which is what entitles it to the chain"
+        );
+
+        // And it agrees with the turn-time path, which knew all along — the two
+        // must not be able to disagree about whether this company can think.
+        let routed = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .expect("the routed path resolves too");
+        assert_eq!(routed.base_url, decl.base_url);
+        assert_eq!(bearer(&routed).await, bearer(&decl).await);
+    }
+
+    #[tokio::test]
+    async fn routing_to_managed_while_the_switch_is_off_resolves_to_nothing() {
+        // The boot path and the turn path have to give the same answer, which is
+        // the whole reason this branch calls `managed_decl` rather than forming a
+        // second opinion. `resolve_effective_for_tier` *refuses* an explicit
+        // `managed` route while the switch is off, so a boot that reported this
+        // company configured would select the harness brain and then hand every
+        // turn to a resolver that errors — inference that looks live on the
+        // status card and fails on contact.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+        store::set_managed_enabled(&company, &secrets, false)
+            .await
+            .unwrap();
+
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a switched-off Managed is not somewhere a workload can be routed, \
+             so it is not what makes this company configured either"
+        );
+
+        // The turn path's refusal is the other half of the same statement.
+        assert!(
+            resolve_effective_for_tier(
+                &company,
+                &Inference::default(),
+                None,
+                &secrets,
+                &HarnessScope::default(),
+                "chat-v1",
+            )
+            .await
+            .is_err(),
+            "and the routed path refuses, which is the answer boot now matches"
+        );
+
+        // Switching it back on restores it, so the gate is the switch and not
+        // the credential — which is untouched throughout.
+        store::set_managed_enabled(&company, &secrets, true)
+            .await
+            .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("switched back on, the same rows resolve");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-managed")
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_to_managed_with_nothing_behind_it_still_resolves_to_nothing() {
+        // The other half, and the one that keeps the echo brain meaningful: the
+        // new branch must widen "configured" only where something can actually
+        // answer. A company that picked Managed and put no credential behind it
+        // — no pasted key, no company account, no instance identity, because no
+        // env default is passed — has configured nothing, and reporting it
+        // configured would take it off the echo brain with nothing to think
+        // with. That is the mirror-image bug, and it is worse.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a managed route with no credential behind it configures nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unset_route_is_not_a_managed_route() {
+        // `ProviderRef::Default` is an absence, not a choice. It maps to
+        // `Resolution::Primary` — the provider list, then the legacy chain, both
+        // of which the new branch runs after. Counting it as managed would
+        // report every company with a managed key configured regardless of what
+        // its routing table says, and would quietly disagree with where the turn
+        // actually goes.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        assert!(
+            !resolve::any_route_is_managed(&store::load_routes(&company, &secrets).await.unwrap()),
+            "an empty routing table names managed nowhere"
+        );
+        assert!(
+            resolve_effective(&company, &Inference::default(), None, &secrets)
+                .await
+                .unwrap()
+                .is_none(),
+            "a stored managed key with no route pointing at it does not configure the company"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_managed_branch_runs_last_and_changes_no_company_that_already_resolved() {
+        // Precedence, asserted rather than assumed: the new branch is a tail, so
+        // a company whose provider list already answers keeps answering there
+        // even with every tier routed to managed and a managed key stored.
+        // Widening a resolver is only safe if it can turn `None` into `Some` and
+        // nothing else.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+        for tier in ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] {
+            route(&secrets, tier, "managed").await;
+        }
+        managed_key(&secrets, "sk-not-a-real-key-managed").await;
+
+        let decl = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("the provider list still answers");
+        assert_eq!(decl.base_url, "https://first.example/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("sk-not-a-real-key-1"));
+    }
+
+    #[tokio::test]
+    async fn a_route_naming_entry_zero_reaches_the_legacy_config() {
+        // Entry zero is the legacy blob wearing a provider's clothes. A route
+        // that names it has to reach the blob's own endpoint and credential —
+        // not whichever indexed provider happens to be the primary.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openai_compatible".into(),
+                base_url: Some("https://legacy.example/v1".into()),
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "sk-not-a-real-key-legacy")
+            .await
+            .unwrap();
+        add_indexed(&secrets, "second", "sk-not-a-real-key-2").await;
+        store::set_default_slug(&company, &secrets, "second")
+            .await
+            .unwrap();
+
+        let zero = store::list_providers(&company, &secrets).await.unwrap()[0].clone();
+        route(&secrets, "chat-v1", &format!("{}:gpt-5", zero.slug)).await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "chat-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://legacy.example/v1");
+        assert_eq!(
+            bearer(&decl).await.as_deref(),
+            Some("sk-not-a-real-key-legacy")
+        );
+        assert_eq!(wire_model(&decl, "chat-v1"), "gpt-5");
+    }
+
+    #[tokio::test]
+    async fn a_tier_nobody_routes_resolves_exactly_as_it_always_did() {
+        // `embedding-v1` and friends have no row on the Routing tab. They must
+        // not acquire one by accident, and they must not fail closed either.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        add_indexed(&secrets, "first", "sk-not-a-real-key-1").await;
+
+        let decl = resolve_effective_for_tier(
+            &company,
+            &Inference::default(),
+            None,
+            &secrets,
+            &HarnessScope::default(),
+            "embedding-v1",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(decl.base_url, "https://first.example/v1");
     }
 }

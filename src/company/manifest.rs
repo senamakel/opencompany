@@ -2600,7 +2600,7 @@ mod tests {
         // leave `manifest.agents` empty — making every roster assertion below
         // pass by having nothing to check.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("companies/signals_opportunity_studio");
+            .join("../../companies/signals_opportunity_studio");
         let manifest = CompanyManifest::from_path(&path).expect("template manifest is valid");
 
         assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());

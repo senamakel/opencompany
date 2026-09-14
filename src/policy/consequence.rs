@@ -2809,7 +2809,7 @@ mod tests {
         let rendered = format!("{}\n", rows.join("\n"));
 
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/snapshots/tool-standing.txt");
+            .join("../../tests/snapshots/tool-standing.txt");
         if std::env::var_os("BLESS_TOOL_STANDING").is_some() {
             std::fs::write(&path, &rendered).expect("write the grantability snapshot");
             return;
@@ -4647,7 +4647,7 @@ mod tests {
     fn every_consequence_tool_has_a_console_label() {
         let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/frontend/src/lib/language.ts"
+            "/../../frontend/src/lib/language.ts"
         ));
         // Read as pairs, not keys: the distinctness half below needs the
         // sentences. `label_keys` is the same parse, so the two halves cannot

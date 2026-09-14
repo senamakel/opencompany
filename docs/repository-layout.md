@@ -1,8 +1,27 @@
 # Repository layout
 
-OpenCompany is a Rust 2024 crate: one configurable host. Business types are
-data, not code, just a `company.toml` manifest plus docs, and the operator
-console is a separate Vite app.
+OpenCompany is a Rust 2024 Cargo workspace: one configurable host, plus the
+shells that embed it. Business types are data, not code, just a `company.toml`
+manifest plus docs, and the operator console is a separate Vite app.
+
+## Crate layout
+
+```text
+Cargo.toml                  Virtual workspace root: members, shared deps, [patch]
+crates/opencompany-core/    The host: package `opencompany-core`, library crate
+                            `opencompany`, binary `opencompany`. Only the manifest
+                            lives here for now — it points at the root `src/`,
+                            `tests/`, `benches/`, `examples/` and `build.rs`.
+crates/opencompany-app/     The Tauri desktop shell (its own workspace + lock)
+crates/opencompany-tui/     The terminal client: the host, embedded, in ratatui
+```
+
+The host's sources stayed at the root when the workspace was introduced so
+that the many branches touching `src/` would not all conflict at once. Every
+`src/...` path below and in the rest of `docs/` is that root tree; moving it
+under `crates/opencompany-core/` is a follow-up that changes no crate name.
+
+## Host source tree
 
 ```text
 src/app/                Runtime config and shared state

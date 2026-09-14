@@ -62,7 +62,12 @@ const MAX_OUTPUT_TOKENS: u32 = 32;
 /// Deterministic. The same request should name the same card every time — a
 /// board whose headlines shift between two runs of the same ask is a board
 /// nobody can scan.
-const TEMPERATURE: f64 = 0.0;
+///
+/// The shared constant rather than a local `0.0`: it is what
+/// `Sampling::from_request` reads back as an *intent*, so this workload also
+/// gets `seed` where the model supports one, and degrades rather than 400s on a
+/// model that forbids a temperature outright.
+const TEMPERATURE: f64 = crate::company::inference::dialect::DETERMINISTIC;
 
 /// The system prompt.
 ///

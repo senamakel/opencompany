@@ -30,8 +30,23 @@ use std::path::{Path, PathBuf};
 include!("src/build_stamp.rs");
 
 fn main() {
-    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    // `CARGO_MANIFEST_DIR` is `crates/opencompany-core`, the member manifest
+    // that names this script — but everything this script reads (the bundles,
+    // the globals, the skills, `src/`, `.git`, `.gitmodules`, the workspace
+    // `Cargo.lock`) lives at the repository root two levels up, where the
+    // host's sources still are. Canonicalised so the paths cargo records for
+    // `rerun-if-changed` carry no `..` segments.
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let root = manifest_dir
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.join("../.."));
     let companies = root.join("companies");
+
+    // The member manifest is where the features and dependencies are declared;
+    // the root one is where `[patch]` and the members are. Either changing is
+    // a reason to restamp.
+    watch_if_present(&manifest_dir.join("Cargo.toml"));
 
     stamp_build_commit(&root);
     embed_globals(&root);

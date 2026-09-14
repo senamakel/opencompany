@@ -28,7 +28,7 @@ import { TITLE_BAR_LADDER, WindowTitleBar } from "@/components/window-title-bar"
  * now, and asserting the absence is the contract.
  */
 const TAURI = JSON.parse(
-  readFileSync(resolve(process.cwd(), "../src-tauri/tauri.conf.json"), "utf8"),
+  readFileSync(resolve(process.cwd(), "../crates/opencompany-app/tauri.conf.json"), "utf8"),
 ) as { app: { windows: { titleBarStyle?: string; trafficLightPosition?: unknown }[] } };
 
 /**

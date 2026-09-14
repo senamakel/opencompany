@@ -60,12 +60,12 @@ cd "${REPO_ROOT}"
 
 LOG="${RUNNER_TEMP:-/tmp}/scoped-suite-$(echo "${LABEL}" | tr -c 'A-Za-z0-9' '-').log"
 
-echo "==> ${LABEL}: cargo test --locked --features ${FEATURES} --lib ${FILTER} ${IGNORED}"
+echo "==> ${LABEL}: cargo test --locked -p opencompany-core --features ${FEATURES} --lib ${FILTER} ${IGNORED}"
 
 if [ "${IGNORED}" = "--ignored" ]; then
-  cargo test --locked --features "${FEATURES}" --lib "${FILTER}" -- --ignored 2>&1 | tee "${LOG}"
+  cargo test --locked -p opencompany-core --features "${FEATURES}" --lib "${FILTER}" -- --ignored 2>&1 | tee "${LOG}"
 else
-  cargo test --locked --features "${FEATURES}" --lib "${FILTER}" 2>&1 | tee "${LOG}"
+  cargo test --locked -p opencompany-core --features "${FEATURES}" --lib "${FILTER}" 2>&1 | tee "${LOG}"
 fi
 
 # The pipeline's first command, not `tee`'s status. A compile error or a failing

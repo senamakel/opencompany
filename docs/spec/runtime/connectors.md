@@ -32,7 +32,7 @@ that the cloud and remote connectors inherit.
 | **`remote`** — a gateway you run | you, on a box you own | that box's `OPENCOMPANY_DATA_DIR` | paired device or carried session | desktop, browser, hub |
 | **`ssh`** — over SSH | you, on a box you own; this application opens the tunnel | that box's `OPENCOMPANY_DATA_DIR` | paired device over loopback | desktop only |
 
-Two of these exist. `local` is `src-tauri/src/local.rs` and the "On this
+Two of these exist. `local` is `crates/opencompany-app/src/local.rs` and the "On this
 computer" tab; `remote` is the "Somewhere else" tab, which is a URL field and
 nothing else. `cloud` and `ssh` are new, and `remote` grows a setup flow rather
 than a text input.
@@ -281,7 +281,7 @@ spawned with an argv.
 ### What the shell has to do
 
 The tunnel is a resource with a lifetime, which makes it the local host's
-sibling rather than the remote host's: something `src-tauri` starts, supervises,
+sibling rather than the remote host's: something `crates/opencompany-app` starts, supervises,
 and tears down, alongside `local.rs`. The command surface mirrors the roster's:
 
 - `oc_open_ssh_tunnel(target) -> SshTunnelInfo` — bind an ephemeral loopback
@@ -440,7 +440,7 @@ to decide whether the "On this computer" tab appears at all.
 
 ### Secrets go in the keychain, references go in the record
 
-Uniformly, across all four: `src-tauri/src/keychain.rs` holds the secret and the
+Uniformly, across all four: `crates/opencompany-app/src/keychain.rs` holds the secret and the
 connection record holds a handle. The rule and its reason are already stated for
 device tokens in `types.ts` — connection records are persisted and passed around
 the UI, so a token in one ends up in `localStorage` and in every React devtools
@@ -475,7 +475,7 @@ Landed:
   started;
 - `cloud`'s waking behaviour — the retry loop, the window, and the row that
   says so;
-- `ssh` end to end: the supervised tunnel roster in `src-tauri/src/ssh.rs` over
+- `ssh` end to end: the supervised tunnel roster in `crates/opencompany-app/src/ssh.rs` over
   the system `ssh`, opened from the chooser and re-opened by every probe;
 - the first-host screen offering the choice rather than describing it;
 - "Manage hosts": renaming, re-addressing and forgetting a connection without

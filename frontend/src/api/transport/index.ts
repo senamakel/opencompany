@@ -136,7 +136,7 @@ export function needsCarriedSession(baseUrl: string): boolean {
  * ## This is a second copy of a rule that lives in Rust
  *
  * Deliberately, and the duplication is the point rather than a smell:
- * `may_carry_a_credential` in `src-tauri/src/proxy/mod.rs` is the one that
+ * `may_carry_a_credential` in `crates/opencompany-app/src/proxy/mod.rs` is the one that
  * enforces it, because a check up here is bypassed by anything reaching the
  * proxy directly. This copy exists so the console can say *why* before it asks
  * — the core's refusal arrives as an opaque IPC rejection that

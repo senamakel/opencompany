@@ -86,7 +86,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # is the exact hole this script exists to close, so the enumeration has to come
 # from the resolver rather than from the text.
 cargo metadata --no-deps --locked --format-version 1 \
-  | jq -r '.packages[] | select(.name == "opencompany") | .features | keys[]' \
+  | jq -r '.packages[] | select(.name == "opencompany-core" or .name == "opencompany-tui") | if .name == "opencompany-core" then .features | keys[] else .features | keys[] | "opencompany-tui/" + . end' \
   | sort > "${WORK}/features"
 
 if [ ! -s "${WORK}/features" ]; then
@@ -212,6 +212,11 @@ owed_checked=0
 while IFS='|' read -r feature status features detail; do
   [ -n "${feature}" ] || continue
 
+  # Workspace-member features are identified in the table as
+  # `package/feature`; source-level gated-test detection still receives the
+  # Cargo feature name itself.
+  source_feature=${feature#*/}
+
   case "${status}" in
     tested | partial)
       if [ -z "${features}" ] || [ "${features}" = "-" ]; then
@@ -262,7 +267,7 @@ while IFS='|' read -r feature status features detail; do
         failed=1
       fi
 
-      found=$(gated_tests_for "${feature}")
+      found=$(gated_tests_for "${source_feature}")
       if [ -n "${found}" ]; then
         echo "::error title=Compile-only feature has gated tests::\`${feature}\` is declared compile-only in ${TABLE}, but these feature-gated tests exist. They are compiled by \`Check (--all-features)\` and RUN BY NOTHING." >&2
         echo "${found}" | sed 's/^/  /' >&2
@@ -299,7 +304,7 @@ while IFS='|' read -r feature status features detail; do
           ;;
       esac
 
-      if [ -z "$(gated_tests_for "${feature}")" ]; then
+      if [ -z "$(gated_tests_for "${source_feature}")" ]; then
         echo "::error title=Owed lane has no gated tests::\`${feature}\` is classified owed, but no feature-gated test was found under it. A feature with no gated tests is compile-only — say so, with a reason, rather than recording a debt that does not exist." >&2
         failed=1
       fi

@@ -2181,8 +2181,8 @@ fn sdl_snapshot_matches() {
 #[test]
 #[ignore = "writes the SDL snapshot; run explicitly after a schema change"]
 fn regenerate_sdl_snapshot() {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/graphql/schema.graphql");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../src/server/graphql/schema.graphql");
     std::fs::write(&path, super::sdl()).unwrap();
 }
 

@@ -1,0 +1,299 @@
+# Cut a STAGING build: bump the patch version, tag it `v<version>-staging`,
+# and build everything a tester needs — signed macOS DMGs as Actions artifacts
+# and a smoke build of the tenant Docker image — WITHOUT creating a GitHub
+# Release. Nothing a user can install from the repository's front page moves.
+#
+# Step two of the release flow (docs/spec/runtime/releases.md):
+#
+#   promote-main-to-release  →  release-staging  →  release-production
+#
+# DISPATCH IT FROM `main` OR `release` — the branch picked in the "Use workflow
+# from" dropdown is the branch that gets cut. That is the ONLY choice to make;
+# there is no tag to type. The workflow bumps the version on that branch,
+# commits `chore(staging): v<version> [skip ci]`, pushes, tags, and builds the
+# tag. A cut from `release` is merged back into main afterwards so main's
+# version never falls behind.
+#
+# WHY THE VERSION MOVES FOR A STAGING BUILD. The tag has to be unique, the
+# DMG carries the version in its filename, and a tester reporting "0.2.3-staging
+# is broken" has to be naming exactly one build. A staging cut and the
+# production cut that follows are therefore two consecutive patch numbers,
+# which is the price of never having two builds called the same thing.
+#
+# There is deliberately no "cut from this older commit" input. The bump commit
+# has to land ON the branch, and a commit built on top of an older point cannot
+# be pushed there without force. A point behind `main` that is worth cutting is
+# what `release` is for: promote it, and cut `release`.
+#
+# `create_tag: false` bumps and pushes the version but tags and builds nothing.
+# It exists for a version-bump-only run; nobody needs it often.
+#
+# Issue #590. Every `uses:` below is a full commit SHA with the resolved version
+# in a trailing comment; the rationale is at the top of `ci.yml`. Local
+# reusable workflows (`./.github/workflows/...`) carry no SHA because they run
+# at this workflow's own commit — the pin check in `ci.yml` exempts them.
+name: Release Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_tag:
+        description: Tag `v<version>-staging` and run the builds. Off = bump and push the version only.
+        required: false
+        type: boolean
+        default: true
+
+# Read by default; the jobs that push a commit, a tag, or delete one say so
+# themselves. A compromised build step then cannot write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-staging
+  cancel-in-progress: false
+
+jobs:
+  prepare-build:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      build_ref: ${{ steps.resolve.outputs.build_ref }}
+    steps:
+      - name: Enforce staging source branch
+        if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/release'
+        run: |
+          echo "::error::Release Staging runs from main or release only (got $GITHUB_REF). Pick one of them in the 'Use workflow from' dropdown." >&2
+          exit 1
+
+      # `fetch-depth: 0`: the tag-exists check and the back-merge both need
+      # real history, and a shallow clone makes `merge-base` lie.
+      - name: Checkout source branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          # This job PUSHES. `actions/checkout` stores GITHUB_TOKEN as an
+          # `http.extraheader` for this checkout only, which is what `git push`
+          # below authenticates with — no token in a remote URL, nothing that
+          # `set -x` could ever print. Every other checkout in this repo says
+          # `false`; those jobs do not push.
+          persist-credentials: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          # `package-manager-cache`, NOT `cache`: the `cache` input takes a
+          # package-manager NAME and the string "false" is truthy, so `cache:
+          # false` asks for a package manager called "false" and the step dies.
+          # Nothing here runs `npm install`, so there is nothing to cache.
+          package-manager-cache: false
+
+      - name: Configure git
+        env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin --tags --prune --prune-tags
+          git checkout "$SOURCE_BRANCH"
+          git pull origin "$SOURCE_BRANCH" --ff-only
+
+      - name: Bump patch version
+        id: bump
+        run: node scripts/release/bump-version.mjs patch
+
+      - name: Verify version sync
+        run: node scripts/release/verify-version-sync.mjs "${{ steps.bump.outputs.version }}"
+
+      - name: Compute staging tag
+        id: tagname
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: echo "tag=v${VERSION}-staging" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure staging tag does not already exist
+        if: inputs.create_tag
+        env:
+          TAG: ${{ steps.tagname.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::Tag $TAG already exists. The version bump would collide with it; look at how the tree got behind that tag." >&2
+            exit 1
+          fi
+
+      # `[skip ci]` is belt-and-braces: a push made with GITHUB_TOKEN does not
+      # fire `push` workflows anyway. The commit changes version numbers only.
+      #
+      # The files staged are the ones the bump script reports it wrote, so the
+      # commit can never miss a file the registry gained. Branch and tag go in
+      # ONE `--atomic` push: either both land or neither, so a tag that races
+      # another dispatch cannot leave a stray bump commit behind.
+      - name: Commit and push version bump
+        id: push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          FILES: ${{ steps.bump.outputs.files }}
+          TAG: ${{ steps.tagname.outputs.tag }}
+          CREATE_TAG: ${{ inputs.create_tag }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # FILES is a space-separated list by contract
+          git add -- $FILES
+          git commit -m "chore(staging): v${VERSION} [skip ci]"
+          if [ "$CREATE_TAG" = "true" ]; then
+            git tag -a "$TAG" -m "Staging cut $TAG"
+            git push --atomic origin "HEAD:$SOURCE_BRANCH" "refs/tags/$TAG"
+          else
+            echo "Skipping tag creation (create_tag=false)"
+            git push origin "HEAD:$SOURCE_BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build outputs
+        id: resolve
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.tagname.outputs.tag }}
+          SHA: ${{ steps.push.outputs.sha }}
+          CREATE_TAG: ${{ inputs.create_tag }}
+        run: |
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "sha=$SHA"
+            if [ "$CREATE_TAG" = "true" ]; then echo "build_ref=$TAG"; else echo "build_ref=$SHA"; fi
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Staging cut \`$TAG\`"
+            echo ""
+            echo "Version \`$VERSION\` at \`$SHA\` on \`${{ github.ref_name }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge release back into main
+        if: github.ref == 'refs/heads/release'
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          bash scripts/release/merge-release-into-main.sh "chore(staging): merge release v${VERSION}-staging back into main"
+
+  build-desktop:
+    name: Build desktop
+    needs: [prepare-build]
+    if: inputs.create_tag
+    # The called workflow declares `contents: write` for its release-upload
+    # path; a caller must grant at least that even when, as here, the path is
+    # off. It uploads Actions artifacts only.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-desktop.yml
+    secrets:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    with:
+      build_ref: ${{ needs.prepare-build.outputs.build_ref }}
+      tag: ${{ needs.prepare-build.outputs.tag }}
+      sign: true
+      with_updater: false
+      with_release_upload: false
+
+  # The tenant image, built and thrown away. `ci.yml` never runs the
+  # Dockerfile and `deploy-staging.yml` only builds from main, so a cut from
+  # `release` is otherwise the first time anyone learns the tree no longer
+  # containerises. ~25 minutes cold; the gha cache scope is shared with the
+  # production cut so the second build of the same tree is mostly a no-op.
+  build-docker:
+    name: "Docker: build (no push)"
+    needs: [prepare-build]
+    if: inputs.create_tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout build ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare-build.outputs.build_ref }}
+          persist-credentials: false
+          submodules: true
+      - name: Init vendored openhuman crate submodules
+        run: scripts/ci/init-vendored-submodules.sh
+      # The feature set the tenant image ships with lives on `deploy-staging.yml`
+      # (`TENANT_FEATURES`), which is the one that reaches a tenant. Read it
+      # rather than copy it, so this build cannot drift into compiling a
+      # different product; an empty read is fatal for the same reason.
+      - name: Read the tenant feature set
+        id: features
+        run: |
+          value="$(sed -n 's/^[[:space:]]*TENANT_FEATURES:[[:space:]]*//p' .github/workflows/deploy-staging.yml | head -1)"
+          if [ -z "$value" ]; then
+            echo "::error::could not read TENANT_FEATURES from deploy-staging.yml" >&2
+            exit 1
+          fi
+          # A cargo feature list and nothing else — the value is spliced into
+          # `build-args` below, so anything but feature names must not pass.
+          if ! [[ "$value" =~ ^[A-Za-z0-9_,-]+$ ]]; then
+            echo "::error::TENANT_FEATURES in deploy-staging.yml is not a plain feature list: '$value'" >&2
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build image (no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          build-args: |
+            FEATURES=${{ steps.features.outputs.value }}
+            OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
+            VITE_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
+          cache-from: type=gha,scope=release-docker
+          cache-to: type=gha,scope=release-docker,mode=max
+
+  # A tag whose builds failed is a tag nobody should be able to install from.
+  # Deleting it lets the next dispatch bump to the next patch cleanly; the
+  # version-bump commit stays on the branch, which is harmless.
+  cleanup-failed-staging:
+    name: Remove staging tag if a build failed
+    needs: [prepare-build, build-desktop, build-docker]
+    if: >-
+      always()
+      && inputs.create_tag
+      && needs.prepare-build.result == 'success'
+      && (needs.build-desktop.result == 'failure' || needs.build-desktop.result == 'cancelled'
+          || needs.build-docker.result == 'failure' || needs.build-docker.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      # Exits 1 either way: this job only runs because a build failed, and the
+      # run must read as failed. The message says what actually happened.
+      - name: Delete remote staging tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}"; then
+            echo "::error::A build failed; staging tag $TAG was removed. Fix the failure and re-dispatch." >&2
+          else
+            echo "::error::A build failed, and staging tag $TAG could not be removed — delete it by hand, fix the failure, re-dispatch." >&2
+          fi
+          exit 1

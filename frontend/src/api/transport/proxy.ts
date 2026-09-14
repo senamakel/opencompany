@@ -14,7 +14,7 @@
 //      cookie is never sent cross-site — so a desktop webview has no way to
 //      open the event stream itself.
 //
-// The Rust side is `src-tauri/src/proxy`, and `tests/proxy_parity.rs` asserts
+// The Rust side is `crates/opencompany-app/src/proxy`, and `tests/proxy_parity.rs` asserts
 // against a real host that what comes back here is byte-identical to what a
 // browser's `fetch` would have seen.
 

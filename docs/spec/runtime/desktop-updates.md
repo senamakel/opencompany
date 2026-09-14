@@ -69,7 +69,7 @@ rule held or the component failed to mount.
 ## How the check works
 
 The Tauri updater plugin fetches the JSON manifest named by
-`plugins.updater.endpoints` in `src-tauri/tauri.conf.json`:
+`plugins.updater.endpoints` in `crates/opencompany-app/tauri.conf.json`:
 
 ```
 https://github.com/tinyhumansai/opencompany/releases/latest/download/latest.json
@@ -97,7 +97,7 @@ The plugin compares `version` with the running application's, downloads this
 machine's entry, and verifies the bytes against the minisign public key
 compiled into the application before anything touches the installed bundle.
 
-Three commands sit over it, in `src-tauri/src/commands.rs`:
+Three commands sit over it, in `crates/opencompany-app/src/commands.rs`:
 
 | Command | Does | On failure |
 |---|---|---|
@@ -118,7 +118,7 @@ GitHub's asset CDN on release day is exactly the minute the retry exists for. A
 **signature** failure is never retried: re-fetching the same bytes cannot fix a
 bad signature, and looping on one would turn a tampered bundle into a drain on
 somebody's battery. The policy is a pure function in
-`src-tauri/src/update.rs` and is unit tested there.
+`crates/opencompany-app/src/update.rs` and is unit tested there.
 
 ### The restart stops the local hosts first
 
@@ -133,14 +133,15 @@ same root, and the application would come back with every company down and
 it clears `autostart`, so the instance stays down next launch. Quiescing
 releases the locks and leaves the roster untouched, so the relaunched
 application comes back running exactly what this one was running. There is a
-test for precisely that in `src-tauri/src/local.rs`.
+test for precisely that in `crates/opencompany-app/src/local.rs`.
 
 ## What the release has to produce
 
 The DMG is **not** what an update installs. On macOS the updater replaces the
 `.app` bundle in place, out of a gzipped tarball with a detached minisign
-signature beside it. `.github/workflows/release-desktop-macos.yml` produces
-three things beyond the DMGs, all gated on `create_release`:
+signature beside it. `.github/workflows/build-desktop.yml` — the reusable build
+`release-production.yml` calls — produces three things beyond the DMGs, all
+gated on its `with_updater` input, which production sets and staging does not:
 
 1. **A guard, before anything is built.** `scripts/release/assert-updater-configured.sh`
    fails the dispatch in seconds if `tauri.conf.json` still carries the
@@ -171,21 +172,14 @@ to the build it already has — silently, with no error anywhere, permanently.
 That is why `publish` needs `updater-manifest`, and why the manifest script
 refuses to upload a partial manifest that names only one architecture.
 
-### A prerelease tag ships no update anybody can reach
+### A staging cut ships no update anybody can reach
 
-`release.yml` marks any tag carrying a hyphen — `v0.2.0-rc.1`, `-beta.2` — as a
-prerelease, so that it does not become the "Latest release" the repository's
-front page points at. `/releases/latest/download/` follows the same rule and
-skips prereleases outright.
-
-So an rc cut through this pipeline still builds, signs and uploads its
-`latest.json`, and **no client will ever resolve it**: every install keeps
-reading the manifest on the last stable release, which is the correct outcome
-and not an accident to fix. What is worth knowing is the two things that
-follow. Dispatching the desktop workflow with `create_release: true` on an rc
-tag spends the signing key and roughly a minute of the release for an asset
-nothing reads. And an rc cannot be *tested* through the updater from this
-endpoint — verifying an update end to end (below) needs two stable tags.
+`release-staging.yml` tags `v<version>-staging` and creates **no GitHub
+Release**: its DMGs are Actions artifacts, and it never builds the updater
+archive or a `latest.json`. So every install keeps reading the manifest on the
+last production release, which is the correct outcome and not an accident to
+fix. It also means a staging build cannot be *tested* through the updater —
+verifying an update end to end (below) needs two production releases.
 
 Adding a second endpoint to `plugins.updater.endpoints` is **not** the fix if an
 rc channel is ever wanted. The plugin walks the list in order and stops at the
@@ -195,7 +189,7 @@ would be opted in to anything — a channel is a property of the install, and
 
 ## macOS only, and why that is the honest answer
 
-`release-desktop-macos.yml` is the only desktop release path that exists. There
+`build-desktop.yml` is the only desktop release path that exists. There
 is no Windows or Linux build published anywhere, so there is nothing for a
 Windows or Linux client to update *to*.
 
@@ -243,7 +237,7 @@ somewhere an operator would back up a signing key.
 ### 2. Put the public half in the config
 
 Copy the **public** key the command printed into
-`src-tauri/tauri.conf.json`:
+`crates/opencompany-app/tauri.conf.json`:
 
 ```json
   "plugins": {
@@ -260,7 +254,7 @@ Copy the **public** key the command printed into
 Commit that. It is a public key; it is meant to be in the tree.
 
 The test `the_shipped_placeholder_is_not_configured` in
-`src-tauri/src/update.rs` asserts the committed config does **not** carry a
+`crates/opencompany-app/src/update.rs` asserts the committed config does **not** carry a
 real-looking key. That test is the tripwire for a key pasted in by accident, so
 the commit that legitimately adds one has to delete or invert it — a deliberate
 edit, in the same change, rather than a silent one.
@@ -277,10 +271,9 @@ variables → Actions:
 
 ### 4. Cut a release
 
-Run `release.yml` for the tag to create the draft, then dispatch
-`Release Desktop (macOS DMG)` with `sign: true` and `create_release: true`. The
-`guard` job proves the key and the secret are both present before anything
-builds.
+Dispatch `Release Production` from the `release` branch
+([releases.md](releases.md)). Its `guard` job proves the key and the secret are
+both present before anything builds.
 
 ## Verifying it end to end
 
@@ -330,6 +323,8 @@ open, and confirm no banner and no error ever appear.
 
 ## See also
 
+- [releases.md](releases.md) — the three workflows that cut a release, and the
+  one decision each of them takes
 - [desktop.md](desktop.md) — the desktop client: connections, transport seam,
   embedded host
 - [desktop-instances.md](desktop-instances.md) — several local hosts on one

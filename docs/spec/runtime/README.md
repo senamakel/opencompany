@@ -51,6 +51,9 @@ Supporting docs:
     structurally carry content, a collector the operator self-hosts, and how to
     turn it off, with the HTTP contract and the transport's own failure
     behaviour split into [analytics-wire.md](analytics-wire.md)
+  - [releases.md](releases.md) — cutting a release: promote main to
+    `release`, then one dispatch for a staging cut or a production cut; the
+    version is computed from the tree, never typed
   - [crash-reporting.md](crash-reporting.md) — errors and panics sent to a
     Sentry project the **operator** owns: the two DSNs, what a report carries,
     the credential scrubber that runs in every build (not only in a reporting

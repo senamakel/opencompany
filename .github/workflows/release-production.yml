@@ -1,0 +1,479 @@
+# Cut a PRODUCTION release from the `release` branch: bump the version, tag
+# `v<version>`, build and notarize both macOS DMGs plus the
+# auto-updater's artifacts, write the release notes, and publish the GitHub
+# Release — all from one dispatch.
+#
+# Step three of the release flow (docs/spec/runtime/releases.md):
+#
+#   promote-main-to-release  →  release-staging  →  release-production
+#
+# DISPATCH IT FROM `release`. Pick `release` in the "Use workflow from"
+# dropdown; any other branch fails in the first step. There is no tag to type:
+# the version is computed from the tree by `release_type`, so the ONE decision
+# is patch / minor / major. Everything else — the draft, the notes, the builds,
+# the manifest, the publish — follows without another dispatch.
+#
+#   gh workflow run release-production.yml --ref release -f release_type=patch
+#
+# WHAT HAPPENS, IN ORDER
+#
+#   prepare-build   bump every version file (scripts/release/bump-version.mjs),
+#                   commit `chore(release): v<version> [skip ci]` to release,
+#                   tag it, merge release back into main.
+#   create-release  generate the notes and create the Release AS A DRAFT.
+#   build-desktop   both DMGs, signed + notarized, plus the updater archives,
+#                   attached to the draft (build-desktop.yml).
+#   build-docker    the tenant image, built and discarded — ci.yml never runs
+#                   the Dockerfile, so this is the only proof the tag
+#                   containerises.
+#
+# There is deliberately NO separate build-and-test job. Everything on `release`
+# arrived through a PR that ran `ci.yml`, and the promotion dispatches `ci.yml`
+# on the snapshot; the desktop and Docker builds below compile the tag with
+# `--locked` anyway. A third compile of the same tree added ~30 minutes to
+# every cut and found nothing the other two would not.
+#   updater-manifest `latest.json` assembled from both architectures' assets.
+#   publish-release check every required asset is on the draft, then flip it
+#                   public. Immutable releases freeze the asset list at that
+#                   moment, so a published release is by construction complete.
+#   cleanup         if anything failed after the tag was pushed, delete the
+#                   draft and the tag, so the next dispatch bumps cleanly and
+#                   nothing half-built is reachable.
+#
+# WHY A DRAFT. This repository has immutable releases: `POST .../assets` on a
+# published release is rejected. It failed exactly that way on v0.0.1-rc.1 —
+# both architectures notarized and stapled, and both then failed to attach to
+# a release that had been frozen 40 minutes earlier. A draft is mutable; the
+# release becomes public already carrying everything.
+#
+# `create_release: false` runs the bump and the builds but
+# tags nothing and creates no Release — the DMGs land as Actions artifacts. It
+# is a rehearsal; the version still moves.
+#
+# Issue #590. Every `uses:` below is a full commit SHA with the resolved version
+# in a trailing comment; the rationale is at the top of `ci.yml`. Local
+# reusable workflows (`./.github/workflows/...`) carry no SHA because they run
+# at this workflow's own commit — the pin check in `ci.yml` exempts them. It
+# matters most here: this workflow holds `contents: write` and publishes what
+# users download.
+name: Release Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: How far the version moves.
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+      create_release:
+        description: Tag and publish the GitHub Release. Off = bump and build only (a rehearsal).
+        required: false
+        type: boolean
+        default: true
+
+# Read by default; the jobs that push, create, publish or delete say so
+# themselves. A compromised build step then cannot write to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-production
+  cancel-in-progress: false
+
+jobs:
+  prepare-build:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      build_ref: ${{ steps.resolve.outputs.build_ref }}
+    steps:
+      - name: Enforce the release branch
+        if: github.ref != 'refs/heads/release'
+        run: |
+          echo "::error::Release Production runs from the release branch only (got $GITHUB_REF). Promote main first (promote-main-to-release.yml), then pick 'release' in the 'Use workflow from' dropdown." >&2
+          exit 1
+
+      - name: Checkout release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release
+          fetch-depth: 0
+          # This job PUSHES. `actions/checkout` stores GITHUB_TOKEN as an
+          # `http.extraheader` for this checkout only, which is what `git push`
+          # below authenticates with — no token in a remote URL, nothing that
+          # `set -x` could ever print. Every other checkout in this repo says
+          # `false`; those jobs do not push.
+          persist-credentials: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Configure git
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin --tags --prune --prune-tags
+          git checkout release
+          git pull origin release --ff-only
+
+      - name: Bump version (${{ inputs.release_type }})
+        id: bump
+        run: node scripts/release/bump-version.mjs "${{ inputs.release_type }}"
+
+      - name: Verify version sync
+        run: node scripts/release/verify-version-sync.mjs "${{ steps.bump.outputs.version }}"
+
+      - name: Ensure tag does not already exist
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::Tag $TAG already exists. The version bump would collide with it; look at how the tree got behind that tag." >&2
+            exit 1
+          fi
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::A GitHub Release named $TAG already exists (a leftover draft?). Delete it, then re-dispatch." >&2
+            exit 1
+          fi
+
+      # `[skip ci]` is belt-and-braces: a push made with GITHUB_TOKEN does not
+      # fire `push` workflows anyway. The commit changes version numbers only.
+      #
+      # The files staged are the ones the bump script reports it wrote, so the
+      # commit can never miss a file the registry gained. Branch and tag go in
+      # ONE `--atomic` push: either both land or neither, so a tag that races
+      # another dispatch cannot leave a stray bump commit behind.
+      - name: Commit and push version bump
+        id: push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          FILES: ${{ steps.bump.outputs.files }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # FILES is a space-separated list by contract
+          git add -- $FILES
+          git commit -m "chore(release): v${VERSION} [skip ci]"
+          if [ "$CREATE_RELEASE" = "true" ]; then
+            git tag -a "$TAG" -m "Release $TAG"
+            git push --atomic origin HEAD:release "refs/tags/$TAG"
+          else
+            echo "Skipping tag creation (create_release=false)"
+            git push origin HEAD:release
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build outputs
+        id: resolve
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          SHA: ${{ steps.push.outputs.sha }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+        run: |
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "sha=$SHA"
+            if [ "$CREATE_RELEASE" = "true" ]; then echo "build_ref=$TAG"; else echo "build_ref=$SHA"; fi
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Production cut \`$TAG\`"
+            echo ""
+            echo "Version \`$VERSION\` at \`$SHA\` on \`release\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # So main's version never falls behind the last release. `continue-on-error`:
+      # a conflicted back-merge must not strand a release that is already
+      # tagged; the warning says to merge by hand.
+      - name: Merge release back into main
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          bash scripts/release/merge-release-into-main.sh "chore(release): merge release v${VERSION} back into main"
+
+  create-release:
+    name: Draft release with notes
+    needs: [prepare-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Nothing to draft
+        if: ${{ !inputs.create_release }}
+        run: echo "create_release=false — no GitHub Release is created; builds upload as Actions artifacts."
+
+      # `fetch-depth: 0`: the notes generator walks `<previous release>..<tag>`
+      # and reads EVERY author before the range to tell a first-time
+      # contributor from a returning one. Under a shallow checkout `git log
+      # A..B` prints nothing for an unknown A and the notes come out empty and
+      # green — the one failure mode worth a full clone to remove.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.create_release
+        with:
+          ref: ${{ needs.prepare-build.outputs.build_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: inputs.create_release
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # `continue-on-error` plus the fallback below, not `||` inside one step:
+      # a failed OpenAI call must still leave a `release-notes.md` behind, and
+      # the two-step form makes WHICH renderer ran visible in the job log. The
+      # step cap sits ABOVE the generator's own 300s OpenAI abort so a hung API
+      # is reported by the script, which names the timeout, rather than by the
+      # step, which reports only "timed out".
+      - name: Generate release notes (AI)
+        id: ai-notes
+        if: inputs.create_release
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::warning::OPENAI_API_KEY is empty — falling back to deterministic notes."
+            exit 1
+          fi
+          node scripts/release/generate-release-notes.mjs \
+            --from latest-release --to "$TAG" --repo "$GITHUB_REPOSITORY" --output release-notes.md
+
+      # NOT `continue-on-error`: if the deterministic renderer cannot produce
+      # notes either, something is wrong with the range itself and the release
+      # should not be cut with an empty body.
+      - name: Generate release notes (deterministic)
+        if: ${{ inputs.create_release && steps.ai-notes.outcome != 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          node scripts/release/generate-release-notes.mjs \
+            --from latest-release --to "$TAG" --repo "$GITHUB_REPOSITORY" --no-ai --output release-notes.md
+
+      - name: Print notes to job summary
+        if: inputs.create_release
+        run: cat release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create draft release
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+          VERSION: ${{ needs.prepare-build.outputs.version }}
+        run: |
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "OpenCompany v${VERSION}" \
+            --notes-file release-notes.md \
+            --verify-tag
+
+  build-desktop:
+    name: Build desktop
+    needs: [prepare-build, create-release]
+    permissions:
+      contents: write # uploads into the draft Release
+    uses: ./.github/workflows/build-desktop.yml
+    secrets:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    with:
+      build_ref: ${{ needs.prepare-build.outputs.build_ref }}
+      tag: ${{ needs.prepare-build.outputs.tag }}
+      sign: true
+      with_updater: ${{ inputs.create_release }}
+      with_release_upload: ${{ inputs.create_release }}
+
+  build-docker:
+    name: "Docker: build (no push)"
+    needs: [prepare-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout build ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare-build.outputs.build_ref }}
+          persist-credentials: false
+          submodules: true
+      - name: Init vendored openhuman crate submodules
+        run: scripts/ci/init-vendored-submodules.sh
+      # Read from `deploy-staging.yml` rather than copied — see release-staging.yml.
+      - name: Read the tenant feature set
+        id: features
+        run: |
+          value="$(sed -n 's/^[[:space:]]*TENANT_FEATURES:[[:space:]]*//p' .github/workflows/deploy-staging.yml | head -1)"
+          if [ -z "$value" ]; then
+            echo "::error::could not read TENANT_FEATURES from deploy-staging.yml" >&2
+            exit 1
+          fi
+          if ! [[ "$value" =~ ^[A-Za-z0-9_,-]+$ ]]; then
+            echo "::error::TENANT_FEATURES in deploy-staging.yml is not a plain feature list: '$value'" >&2
+            exit 1
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build image (no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          tags: opencompany-tenant:${{ needs.prepare-build.outputs.tag }}
+          build-args: |
+            FEATURES=${{ steps.features.outputs.value }}
+            OPENCOMPANY_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
+            VITE_BUILD_COMMIT=${{ needs.prepare-build.outputs.sha }}
+          cache-from: type=gha,scope=release-docker
+          cache-to: type=gha,scope=release-docker,mode=max
+
+  # `latest.json` is written into the DRAFT, before publish. A release
+  # published without a manifest pins every existing install to the build it
+  # already has — silently, with no error anywhere, permanently. The script
+  # refuses a partial manifest naming only one architecture.
+  updater-manifest:
+    name: Publish updater manifest (latest.json)
+    needs: [prepare-build, build-desktop]
+    if: inputs.create_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare-build.outputs.build_ref }}
+          persist-credentials: false
+      - name: Generate and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+          VERSION: ${{ needs.prepare-build.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/release/publish-updater-manifest.sh
+
+  publish-release:
+    name: Publish release
+    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest]
+    if: inputs.create_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Every asset a release must carry, or the release is not cut. The DMGs
+      # are what a person installs; the archives and signatures are what an
+      # installed client updates from; `latest.json` is how it finds them.
+      - name: Validate required assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > assets.txt
+          echo "Assets on $TAG:"; sed 's/^/  /' assets.txt
+          missing=0
+          for pattern in \
+            '^OpenCompany_.*_aarch64\.dmg$' \
+            '^OpenCompany_.*_x64\.dmg$' \
+            '^OpenCompany_.*_aarch64\.app\.tar\.gz$' \
+            '^OpenCompany_.*_aarch64\.app\.tar\.gz\.sig$' \
+            '^OpenCompany_.*_x64\.app\.tar\.gz$' \
+            '^OpenCompany_.*_x64\.app\.tar\.gz\.sig$' \
+            '^latest\.json$'; do
+            if ! grep -qE "$pattern" assets.txt; then
+              echo "::error::required asset missing from $TAG: $pattern" >&2
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest
+          url="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json url --jq .url)"
+          echo "Published $url"
+          {
+            echo "### Published"
+            echo ""
+            echo "$url"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # A release that failed after the tag was pushed must leave nothing behind:
+  # the draft (asset-less or half-filled) and the tag both go, so the next
+  # dispatch bumps to the next patch cleanly and nothing half-built is
+  # reachable. The version-bump commit stays on `release`; that is harmless.
+  cleanup-failed-release:
+    name: Remove draft and tag if a step failed
+    # Including `publish-release`: a failed asset check or a failed
+    # `gh release edit` is exactly the half-built state this job exists for.
+    needs: [prepare-build, create-release, build-desktop, build-docker, updater-manifest, publish-release]
+    if: >-
+      always()
+      && inputs.create_release
+      && needs.prepare-build.result == 'success'
+      && (needs.create-release.result == 'failure' || needs.create-release.result == 'cancelled'
+          || needs.build-desktop.result == 'failure' || needs.build-desktop.result == 'cancelled'
+          || needs.build-docker.result == 'failure' || needs.build-docker.result == 'cancelled'
+          || needs.updater-manifest.result == 'failure' || needs.updater-manifest.result == 'cancelled'
+          || needs.publish-release.result == 'failure' || needs.publish-release.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Delete draft release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-build.outputs.tag }}
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --yes && echo "Deleted draft release $TAG"
+            else
+              echo "::warning::Release $TAG is already published; leaving it and the tag alone."
+              exit 0
+            fi
+          fi
+          if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}"; then
+            echo "Deleted remote tag $TAG"
+          else
+            echo "::warning::Could not delete tag $TAG (already gone?)"
+          fi
+          echo "::error::A step failed; draft $TAG and its tag were removed. Fix the failure and re-dispatch." >&2
+          exit 1

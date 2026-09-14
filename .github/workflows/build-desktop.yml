@@ -1,0 +1,403 @@
+# Build the OpenCompany Tauri desktop shell as a macOS DMG, for both
+# architectures. Reusable: called by `release-staging.yml` and
+# `release-production.yml`, never dispatched by hand. The dispatchable flow is
+# in docs/spec/runtime/releases.md.
+#
+# Issue #1732. Both legs of the `target` matrix run on `macos-latest` (Apple
+# Silicon); the Intel leg CROSS-COMPILES rather than booking an Intel runner.
+# `macos-13` is retired and the surviving Intel label has narrower
+# availability, so a native leg would make a release depend on a second,
+# scarcer runner pool for no gain a user can observe. Apple's clang
+# cross-compiles the C dependencies (bundled SQLite, SecurityFramework) from
+# the same SDK, and `hdiutil` does not care which architecture the .app inside
+# the image is. Nothing here EXECUTES the built binary, so the absence of
+# Rosetta on the runner does not bite. Tauri names the outputs per-arch
+# (`OpenCompany_<version>_aarch64.dmg` / `..._x64.dmg`), so both legs can
+# attach to one Release without colliding.
+#
+# THREE THINGS a caller decides, each an input:
+#
+#   `sign`                Developer-ID sign + Apple-notarize the .app and DMG.
+#                         Needs the six APPLE_* secrets; the `guard` job fails
+#                         in seconds if one is missing, before ~60 minutes of
+#                         compile. Both staging and production sign, so a
+#                         staging DMG opens on a tester's Mac the way a
+#                         production one does.
+#   `with_updater`        Also package and sign the auto-updater's
+#                         `.app.tar.gz` + `.sig`. Production only: the updater
+#                         resolves `latest.json` on the newest PUBLISHED
+#                         release, so a staging build's artifact is one nothing
+#                         can ever reach.
+#   `with_release_upload` Attach the outputs to the DRAFT GitHub Release named
+#                         by `tag`; otherwise upload them as Actions artifacts.
+#                         Requires `sign` — an unsigned DMG never goes to a
+#                         public Release — and the draft must already exist.
+#
+# THE RELEASE IS A DRAFT while this runs. This repository has immutable
+# releases: publishing freezes the asset list and nothing can be added
+# afterwards. So the caller creates the draft, this workflow uploads into it,
+# and the caller publishes once everything is attached — a release becomes
+# immutable and public in the same moment, already complete.
+#
+# THE UPDATER'S ARTIFACT IS BUILT AFTER NOTARIZATION, deliberately.
+# `bundle.createUpdaterArtifacts` would have the bundler emit it during `tauri
+# build` — from the unsigned `.app`, because signing happens in later steps —
+# so every client that took an update would end up with a bundle Gatekeeper
+# refuses to launch. Building it after `xcrun stapler validate` means the
+# updater installs byte-for-byte the bundle Apple approved.
+# `docs/spec/runtime/desktop-updates.md` has the whole picture.
+#
+# FEATURES ARE PASSED AT BUILD TIME, not committed to
+# `crates/opencompany-app/Cargo.toml`. See `DESKTOP_RELEASE_FEATURES` on the
+# build job for the whole argument; `scripts/ci/assert-desktop-features.sh`
+# reads the value from THIS file and holds `ci.yml` and `desktop-dev.sh` to it.
+#
+# Issue #590. Every `uses:` below is a full commit SHA with the resolved version
+# in a trailing comment. The rationale is at the top of `ci.yml`.
+# `dtolnay/rust-toolchain` additionally passes an explicit `toolchain:` matching
+# `rust-toolchain.toml`; `scripts/ci/assert-toolchain-pin.sh` enforces that.
+name: Build Desktop (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      build_ref:
+        description: Git ref to check out for the build — the release tag, or a SHA when no tag was cut.
+        type: string
+        required: true
+      tag:
+        description: Release tag the outputs belong to (`v0.2.0`, `v0.2.0-staging`). Names the artifacts and the draft Release.
+        type: string
+        required: true
+      sign:
+        description: Developer-ID sign and notarize. Requires the six APPLE_* secrets.
+        type: boolean
+        default: true
+      with_updater:
+        description: Package and sign the `.app.tar.gz` + `.sig` the auto-updater installs from. Requires TAURI_SIGNING_PRIVATE_KEY.
+        type: boolean
+        default: false
+      with_release_upload:
+        description: Attach outputs to the DRAFT GitHub Release named by `tag` instead of uploading Actions artifacts. Requires `sign`.
+        type: boolean
+        default: false
+    # Named rather than `secrets: inherit`, so a caller hands over exactly the
+    # signing material and nothing else the repository holds (AWS, SSH, OpenAI).
+    # All optional: `guard` names the missing one when an input needs it.
+    secrets:
+      APPLE_CERTIFICATE_BASE64:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    name: Guard build inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.build_ref }}
+          persist-credentials: false
+
+      - name: A Release only ever carries a signed DMG
+        if: inputs.with_release_upload && !inputs.sign
+        run: |
+          echo "::error::with_release_upload=true requires sign=true — an unsigned DMG must not be attached to a GitHub Release." >&2
+          exit 1
+
+      - name: Require an existing DRAFT Release to attach to
+        if: inputs.with_release_upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::No GitHub Release exists for tag '$TAG'. The caller must create the draft before building." >&2
+            exit 1
+          fi
+          if [ "$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::error::Release '$TAG' is already published. Immutable releases freeze the asset list at publish, so nothing more can be attached. Cut a new version." >&2
+            exit 1
+          fi
+
+      - name: Validate signing prerequisites
+        if: inputs.sign
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for var in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!var}" ]; then
+              echo "::error::sign=true but required macOS signing secret is missing: $var" >&2
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      # A release nobody can update FROM is worse than no release: an installed
+      # client polls `latest.json` on the newest published release forever, so a
+      # release published without one — or with artifacts signed by a key the
+      # shipped application does not carry — pins every existing install to
+      # whatever it already has, silently and permanently. Immutable releases
+      # mean it cannot be repaired afterwards either. Nothing in Tauri notices:
+      # `plugins.updater.pubkey` is an opaque string until a bundle is verified
+      # on somebody else's machine. So the check is here, in seconds.
+      - name: Validate updater prerequisites
+        if: inputs.with_updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bash scripts/release/assert-updater-configured.sh
+
+  build:
+    name: "Desktop: ${{ matrix.target }}"
+    needs: guard
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      # One arch failing must not cancel the other: a green arm64 DMG is worth
+      # having even while the Intel leg is being fixed, and the two failure
+      # modes are usually unrelated.
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    env:
+      # The feature set the SHIPPED desktop build carries, over and above the
+      # default set in `crates/opencompany-app/Cargo.toml`.
+      #
+      # Deliberately here and not in that manifest. `acp` and `composio` are
+      # both `= ["openhuman"]` in the root `Cargo.toml` — pure `cfg` switches
+      # that pull no `dep:` entry, and `openhuman` is already on via `mcp`. So
+      # enabling them adds ZERO packages to the graph and leaves
+      # `crates/opencompany-app/Cargo.lock` byte-identical, which is what lets
+      # the `--locked` below still hold. A feature that gated an optional
+      # dependency could not be passed this way; it would have to move into the
+      # manifest.
+      #
+      # What they buy, and why a DMG without them is worse than lean:
+      #
+      # * `acp` — `RuntimeBuilder::with_acp_agents` is `#[cfg(feature = "acp")]`
+      #   (src/runtime/builder.rs) and `src/desktop.rs` only calls it under the
+      #   same gate, so without the feature `builder.rs` forces `acp_agents =
+      #   None` and EVERY `transport = "local"` harness resolves `unavailable`.
+      #   The desktop is the only host that has an `AcpAgentFactory` to give —
+      #   `crates/opencompany-app/src/embedded.rs` hands one over
+      #   unconditionally, and the seam on `AppState` is ungated, so it compiled
+      #   and was silently dropped. Shipping without `acp` ships that dead lane
+      #   (issue #1245).
+      # * `composio` — `src/server/ops/composio.rs` reports
+      #   `in_build: cfg!(feature = "composio")`, so without it the console's
+      #   connector tiles render "this build was compiled without", an
+      #   instruction no desktop user can follow. With it they ask for the
+      #   credential they need, which a desktop operator can actually supply.
+      #   It still fails closed with none; that was never the rebuild's job.
+      #
+      # `ci.yml`'s `Desktop` lane passes this SAME string to clippy and test —
+      # otherwise the release would ship a feature combination nothing ever
+      # compiled. `scripts/ci/assert-desktop-features.sh` keeps them in step.
+      DESKTOP_RELEASE_FEATURES: opencompany-core/acp,opencompany-core/composio
+    steps:
+      # The exact ref the caller resolved — the tag, or the bump commit's SHA
+      # when no tag was cut. Never the dispatch branch: if it advanced since
+      # the cut, an unpinned checkout would build newer source and attach it to
+      # the older release (the drift flagged on #1733).
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.build_ref }}
+          submodules: true
+          persist-credentials: false
+
+      # `submodules: true` is not recursive. The vendored openhuman crate's own
+      # path-dependency crates must resolve for Cargo even on a default build.
+      # THE ONE PLACE this runs — see the script header (issue #592).
+      - name: Init vendored openhuman crate submodules
+        run: scripts/ci/init-vendored-submodules.sh
+
+      # `toolchain:` must match rust-toolchain.toml (asserted by
+      # scripts/ci/assert-toolchain-pin.sh). Adds this leg's macOS target on
+      # the same toolchain — `x86_64-apple-darwin` is a cross target on this
+      # runner, `aarch64-apple-darwin` is native.
+      - name: Install Rust (rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: "1.98.0"
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+
+      - name: Ensure ${{ matrix.target }} target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # BEFORE the Tauri build. `beforeBuildCommand` is empty in
+      # tauri.conf.json, so nothing else compiles `frontend/dist` — the bundler
+      # would package a stale or missing dist otherwise.
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      # The Tauri CLI compiles the Rust shell and packages the .app + unsigned
+      # .dmg. macOS signing is intentionally skipped here and handled by the
+      # dedicated sign + notarize step below (hardened runtime + entitlements
+      # are required for notarization). Path-qualified CLI so the project
+      # resolves to crates/opencompany-app/ (assert-single-tauri-app.sh).
+      - name: Build and package Tauri app (unsigned)
+        working-directory: crates/opencompany-app
+        env:
+          # Keep in sync with bundle.macOS.minimumSystemVersion in
+          # crates/opencompany-app/tauri.conf.json — the Wry system-WebView floor.
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          ../../frontend/node_modules/.bin/tauri build \
+            --target ${{ matrix.target }} \
+            -- --locked --features "$DESKTOP_RELEASE_FEATURES"
+
+      - name: Locate .app and .dmg bundles
+        id: locate
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="crates/opencompany-app/target/${TARGET}/release/bundle"
+          APP_PATH="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1 || true)"
+          DMG_PATH="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' ! -name 'rw.*.dmg' -type f 2>/dev/null | head -1 || true)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app found under $BUNDLE_DIR/macos" >&2
+            find "$BUNDLE_DIR" -type d 2>/dev/null || true
+            exit 1
+          fi
+          if [ -z "$DMG_PATH" ]; then
+            echo "::error::No .dmg found under $BUNDLE_DIR/dmg" >&2
+            find "$BUNDLE_DIR" -type f 2>/dev/null || true
+            exit 1
+          fi
+          {
+            echo "app_path=$APP_PATH"
+            echo "dmg_path=$DMG_PATH"
+            echo "bundle_dir=$BUNDLE_DIR"
+          } >> "$GITHUB_OUTPUT"
+          echo "Found .app: $APP_PATH"
+          echo "Found .dmg: $DMG_PATH"
+
+      # ---- Developer-ID sign + notarize (gated on `sign`) --------------------
+      # The six APPLE_* secrets were already proved present by `guard`.
+      - name: Sign and notarize .app
+        if: inputs.sign
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          bash scripts/release/sign-and-notarize-macos.sh \
+            "${{ steps.locate.outputs.app_path }}" \
+            "crates/opencompany-app/entitlements.plist"
+
+      - name: Re-package DMG after notarization
+        if: inputs.sign
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          bash scripts/release/repackage-dmg.sh \
+            "${{ steps.locate.outputs.app_path }}" \
+            "${{ steps.locate.outputs.bundle_dir }}"
+
+      - name: Verify notarization staple
+        if: inputs.sign
+        run: |
+          xcrun stapler validate "${{ steps.locate.outputs.dmg_path }}"
+
+      # ---- The auto-updater's own artifact (gated on `with_updater`) ---------
+      # From the stapled bundle, so what an update installs is what Apple
+      # approved; see the header. `guard` has proved the signing secret and a
+      # real pubkey are present whenever this runs.
+      - name: Package signed update artifact
+        id: updater
+        if: inputs.with_updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bash scripts/release/package-updater-artifact.sh \
+            "${{ steps.locate.outputs.app_path }}" \
+            "${{ matrix.target }}" \
+            "${{ steps.locate.outputs.bundle_dir }}/updater" >> "$GITHUB_OUTPUT"
+
+      # ---- Deliver ------------------------------------------------------------
+      # Into the same DRAFT the DMG goes to, before it is published: immutable
+      # releases freeze the asset list at publish, so an archive that misses
+      # this window can never be added.
+      - name: Attach update artifact to draft release
+        if: inputs.with_updater && inputs.with_release_upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          ARCHIVE: ${{ steps.updater.outputs.archive }}
+          SIGNATURE: ${{ steps.updater.outputs.signature }}
+        run: |
+          set -euo pipefail
+          for f in "$ARCHIVE" "$SIGNATURE"; do
+            if [ -z "$f" ] || [ ! -s "$f" ]; then
+              echo "::error::package-updater-artifact.sh reported no usable archive/signature (archive='$ARCHIVE', signature='$SIGNATURE'); refusing to upload." >&2
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" "$ARCHIVE" "$SIGNATURE" -R "$GITHUB_REPOSITORY" --clobber
+
+      # BOTH matrix legs reach this step, each with its own per-arch filename,
+      # so the Release ends up carrying both DMGs.
+      - name: Attach signed DMG to draft release
+        if: inputs.with_release_upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          DMG_PATH: ${{ steps.locate.outputs.dmg_path }}
+        run: gh release upload "$TAG" "$DMG_PATH" -R "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload DMG as Actions artifact
+        if: "!inputs.with_release_upload"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: opencompany-${{ inputs.tag }}-${{ matrix.target }}-dmg
+          path: ${{ steps.locate.outputs.dmg_path }}
+          if-no-files-found: error

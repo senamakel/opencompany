@@ -1193,7 +1193,7 @@ async fn call_model(
     let request = ModelRequest {
         messages: vec![Message::system(system), Message::user(user)],
         model: Some(builder.model_name.clone()),
-        temperature: Some(0.0),
+        temperature: Some(crate::company::inference::dialect::DETERMINISTIC),
         max_tokens: Some(MAX_OUTPUT_TOKENS),
         ..ModelRequest::default()
     };

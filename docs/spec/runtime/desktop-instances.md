@@ -7,7 +7,7 @@ embedded host itself — are in [`desktop.md`](desktop.md).
 
 ## Several hosts on one machine
 
-`src-tauri/src/local.rs` is the layer above `embedded.rs`: `embedded` starts
+`crates/opencompany-app/src/local.rs` is the layer above `embedded.rs`: `embedded` starts
 *one* host over *one* data root and says nothing about which roots exist;
 `LocalHosts` is the roster of the roots an operator asked for, and which of them
 are listening. Two hosts cannot share a root (`prepare_instance` locks it,
@@ -165,7 +165,7 @@ OPENCOMPANY_DATA_DIR=$PWD/target/desktop-dev ./scripts/desktop-dev.sh
 ```
 
 It starts the dev server (reusing one already on `:5173`), waits for it to
-answer, and runs the shell from `src-tauri/`.
+answer, and runs the shell from `crates/opencompany-app/`.
 
 **Not** `build.beforeDevCommand`. The Tauri CLI runs that hook from a directory
 it *derives* by scanning for a `package.json`, and which one it picks is not

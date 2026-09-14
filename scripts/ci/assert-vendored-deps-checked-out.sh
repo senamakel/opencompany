@@ -31,12 +31,15 @@ cd "$(dirname "$0")/../.."
 
 status=0
 
-vendored="$(grep -Eo 'path = "vendor/[^/"]+' Cargo.toml \
-  | sed 's|path = "vendor/||' \
+# Two manifests: the root `Cargo.toml` holds the `[patch]` tables (paths
+# relative to the root, `vendor/...`), and `crates/opencompany-core/Cargo.toml`
+# holds the path dependencies (relative to that member, `../../vendor/...`).
+vendored="$(grep -Eho 'path = "(\.\./\.\./)?vendor/[^/"]+' Cargo.toml crates/opencompany-core/Cargo.toml \
+  | sed -E 's|path = "(\.\./\.\./)?vendor/||' \
   | sort -u)"
 
 if [ -z "$vendored" ]; then
-  echo "assert-vendored-deps: no vendored path dependencies found in Cargo.toml" >&2
+  echo "assert-vendored-deps: no vendored path dependencies found in Cargo.toml or crates/opencompany-core/Cargo.toml" >&2
   echo "If that is now true, delete this script; if it is not, the grep has rotted." >&2
   exit 1
 fi

@@ -89,6 +89,13 @@ DELETE /api/v1/companies/{id}/inference must-change-password-admin refused:403:p
 DELETE /api/v1/companies/{id}/inference platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/inference tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/companies/{id}/inference tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} admin permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} platform permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/companies/{id}/inference/providers/{slug} tenant-owner permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/companies/{id}/ledgers/{slug} admin permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/companies/{id}/ledgers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/companies/{id}/ledgers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=none-assigned:ledger-authority
@@ -292,6 +299,13 @@ DELETE /api/v1/company/inference must-change-password-admin refused:403:password
 DELETE /api/v1/company/inference platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/inference tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 DELETE /api/v1/company/inference tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} admin permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} platform permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=-
+DELETE /api/v1/company/inference/providers/{slug} tenant-owner permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/company/ledgers/{slug} admin permitted source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/company/ledgers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=destructive note="" wait=-
 DELETE /api/v1/company/ledgers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=destructive note="" wait=none-assigned:ledger-authority
@@ -656,6 +670,20 @@ GET /api/v1/companies/{id}/inference/models must-change-password-admin refused:4
 GET /api/v1/companies/{id}/inference/models platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/inference/models tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/inference/models tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/providers/{slug}/models tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/companies/{id}/inference/routes tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/ledgers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/ledgers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/companies/{id}/ledgers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1244,6 +1272,20 @@ GET /api/v1/company/inference/models must-change-password-admin refused:403:pass
 GET /api/v1/company/inference/models platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/inference/models tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/inference/models tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/providers/{slug}/models tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes admin permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes member refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes platform permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=ordinary note="" wait=-
+GET /api/v1/company/inference/routes tenant-owner permitted source=ops access=admin features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/ledgers admin permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/ledgers anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 GET /api/v1/company/ledgers member permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
@@ -1839,6 +1881,55 @@ POST /api/v1/companies/{id}/inboxes/{key}/read must-change-password-admin refuse
 POST /api/v1/companies/{id}/inboxes/{key}/read platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/inboxes/{key}/read tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/companies/{id}/inboxes/{key}/read tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/enabled tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/managed/test admin permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test member permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/managed/test tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/companies/{id}/inference/probe admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/probe tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/default tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/enabled tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test admin permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test member permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/companies/{id}/inference/providers/{slug}/test tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
 POST /api/v1/companies/{id}/inference/restart admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/inference/restart anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/companies/{id}/inference/restart member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2301,6 +2392,55 @@ POST /api/v1/company/inboxes/{key}/read must-change-password-admin refused:403:p
 POST /api/v1/company/inboxes/{key}/read platform permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/inboxes/{key}/read tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
 POST /api/v1/company/inboxes/{key}/read tenant-owner permitted source=ops access=scoped features=openhuman blast=ordinary note="" wait=-
+POST /api/v1/company/inference/managed/enabled admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/enabled tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/managed/test admin permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test member permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/managed/test tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe the managed tier with the stored credential." wait=-
+POST /api/v1/company/inference/probe admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/probe tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/default tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/enabled tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+POST /api/v1/company/inference/providers/{slug}/test admin permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test anonymous refused:401:unauthorized source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test member permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test must-change-password-admin refused:403:password_change_required source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test platform permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test tenant-non-owner refused:403:forbidden source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
+POST /api/v1/company/inference/providers/{slug}/test tenant-owner permitted source=ops access=scoped features=openhuman blast=credential note="Members may probe a stored provider with its stored credential." wait=-
 POST /api/v1/company/inference/restart admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/inference/restart anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 POST /api/v1/company/inference/restart member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2665,6 +2805,27 @@ PUT /api/v1/companies/{id}/inference must-change-password-admin refused:403:pass
 PUT /api/v1/companies/{id}/inference platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/inference tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/companies/{id}/inference tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/managed/key tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/providers/{slug} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/companies/{id}/inference/routes tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/companies/{id}/logo admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/companies/{id}/logo anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/companies/{id}/logo member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
@@ -2868,6 +3029,27 @@ PUT /api/v1/company/inference must-change-password-admin refused:403:password_ch
 PUT /api/v1/company/inference platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/inference tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
 PUT /api/v1/company/inference tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/managed/key tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} admin permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} member refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} platform permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/providers/{slug} tenant-owner permitted source=ops access=admin features=openhuman blast=credential note="" wait=-
+PUT /api/v1/company/inference/routes admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes must-change-password-admin refused:403:password_change_required source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes platform permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes tenant-non-owner refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-
+PUT /api/v1/company/inference/routes tenant-owner permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/company/logo admin permitted source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/company/logo anonymous refused:401:unauthorized source=ops access=admin features=openhuman blast=authority note="" wait=-
 PUT /api/v1/company/logo member refused:403:forbidden source=ops access=admin features=openhuman blast=authority note="" wait=-

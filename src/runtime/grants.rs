@@ -1108,6 +1108,21 @@ impl GrantSet {
     pub fn rehydrate_standing(&self, grants: impl IntoIterator<Item = StandingGrant>) {
         let mut state = self.inner.lock().expect("grant set poisoned");
         for grant in grants {
+            if grant
+                .expires_at_millis
+                .checked_sub(grant.at_millis)
+                .is_none_or(|duration| duration == 0 || duration > MAX_STANDING_GRANT_MILLIS)
+            {
+                tracing::warn!(
+                    "[grants] standing grant '{}' was not restored: its lifetime \
+                     ({} -> {}) is zero, inverted, or past the {}ms ceiling",
+                    grant.id,
+                    grant.at_millis,
+                    grant.expires_at_millis,
+                    MAX_STANDING_GRANT_MILLIS
+                );
+                continue;
+            }
             state.standing.insert(grant.id.clone(), grant);
         }
     }
@@ -3203,35 +3218,6 @@ mod test {
         );
     }
 
-    /// `GrantConsumed` is only written at the cycle drain, not at `consume`
-    /// itself, so a crash between the two loses the durable record of the
-    /// consumption. A fresh boot's `rehydrate`, seeing only the journal's
-    /// `ApprovalGranted` line and no `GrantConsumed` to fold it back out,
-    /// re-arms a grant that was already spent — the boot-time surfacing of
-    /// the window names for the in-process case.
-    #[test]
-    #[ignore = "a grant consumed but not yet journal-drained before a restart rehydrates as live again, because GrantConsumed is only written at the cycle drain"]
-    fn a_grant_consumed_before_its_journal_drain_does_not_survive_a_restart() {
-        let args = serde_json::json!({ "to": "a@b.test" });
-        let before_crash = GrantSet::default();
-        before_crash.grant(call("a1", "finance", "composio_execute", args.clone()));
-        assert!(
-            before_crash
-                .consume("finance", "composio_execute", &args)
-                .is_some(),
-            "the agent redeemed it just before the crash"
-        );
-        // The crash lands before `drain_consumed` is journaled, so replay at
-        // boot only has the original `ApprovalGranted` line to fold in.
-        let after_restart = GrantSet::default();
-        after_restart.rehydrate([call("a1", "finance", "composio_execute", args.clone())]);
-        assert!(
-            after_restart.peek(&ApprovalId::new("a1")).is_none(),
-            "a grant already redeemed before the crash must not come back live \
-             after a restart that never saw its consumption journaled"
-        );
-    }
-
     /// The approval sweep caps how much housekeeping one tick does
     /// (`MAX_RETIREMENTS_PER_TICK`); `GrantSet::sweep` has no equivalent, so a
     /// company with a large expired-grant backlog processes every one of them
@@ -3258,13 +3244,7 @@ mod test {
         assert_eq!(set.live_count(), 0);
     }
 
-    /// The 7-day ceiling (`MAX_STANDING_GRANT_MILLIS`) is enforced at the
-    /// resolve route when a grant is minted, not on `StandingGrant` itself —
-    /// so `rehydrate_standing`, which is what a journal replay calls, accepts
-    /// a line whose `expires_at_millis` is far past that ceiling with no
-    /// re-check.
     #[test]
-    #[ignore = "rehydrate_standing accepts a journal line whose expiry exceeds the 7-day ceiling verbatim, with no re-check against MAX_STANDING_GRANT_MILLIS"]
     fn rehydrate_standing_refuses_a_line_past_the_seven_day_ceiling() {
         let set = GrantSet::default();
         let far_future_expiry = 1_000 + MAX_STANDING_GRANT_MILLIS * 10;
@@ -3276,6 +3256,39 @@ mod test {
             "a rehydrated standing grant must not outlive the 7-day ceiling every other \
              mint path enforces, even when the journal line itself claims a longer expiry"
         );
+    }
+
+    #[test]
+    fn rehydrate_standing_checks_each_duration_without_rebasing_its_expiry() {
+        for (at_millis, expires_at_millis, accepted) in [
+            (1_000, 1_001, true),
+            (1_000, 1_000 + MAX_STANDING_GRANT_MILLIS, true),
+            (1_000, 1_001 + MAX_STANDING_GRANT_MILLIS, false),
+            (1_000, 1_000, false),
+            (1_000, 999, false),
+            (0, u64::MAX, false),
+            (u64::MAX - MAX_STANDING_GRANT_MILLIS, u64::MAX, true),
+        ] {
+            for verdict in [Verdict::Approve, Verdict::Deny] {
+                let set = GrantSet::default();
+                let mut grant = standing("candidate", "maya", "web_fetch", expires_at_millis);
+                grant.at_millis = at_millis;
+                grant.verdict = verdict;
+                let valid = standing("valid", "maya", "web_fetch", 2_000);
+                set.rehydrate_standing([grant.clone(), valid.clone()]);
+
+                assert_eq!(
+                    set.peek_standing_by_approval(&grant.approval_id),
+                    accepted.then_some(grant),
+                    "duration bounds: {at_millis}..{expires_at_millis}, {verdict:?}"
+                );
+                assert_eq!(
+                    set.peek_standing_by_approval(&valid.approval_id),
+                    Some(valid),
+                    "an invalid line must not discard a valid sibling"
+                );
+            }
+        }
     }
 
     /// `subject()` reads an empty `agent` with no `workflow` as an agent

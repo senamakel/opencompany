@@ -114,7 +114,7 @@ So a session has a second carrier, documented in [`users.md`](users.md) →
 "Two carriers, one session". Getting one is the client's own business: device
 pairing left the host with the rest of the device routes.
 
-The token lives in the OS keychain (`src-tauri/src/keychain.rs`), and the
+The token lives in the OS keychain (`crates/opencompany-app/src/keychain.rs`), and the
 console never sees it. `oc_connect` takes no device material: the core resolves
 a paired session by connection id. Pairing runs entirely in Rust —
 `oc_pair_device` performs the claim, writes the result to the keychain, and
@@ -134,7 +134,7 @@ pairing there does not survive a logout) are documented in the module.
 
 ## ACP
 
-`src-tauri/src/acp/` is the client half: it spawns a locally-installed harness
+`crates/opencompany-app/src/acp/` is the client half: it spawns a locally-installed harness
 over stdio and serves the `fs/read_text_file` and `fs/write_text_file` methods
 the agent calls back with. Path confinement is enforced in Rust, below the UI —
 the console renders the permission prompt but must never be the thing that

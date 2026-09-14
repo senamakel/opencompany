@@ -310,7 +310,7 @@ describe("picking a transport", () => {
    * Which hosts may be sent a secret, as opposed to merely reached.
    *
    * The console's copy of `may_carry_a_credential` in
-   * `src-tauri/src/proxy/mod.rs`; the Rust one enforces, this one explains. The
+   * `crates/opencompany-app/src/proxy/mod.rs`; the Rust one enforces, this one explains. The
    * two must agree, or the console offers a connection the core will refuse —
    * which is the shape of the confusion #613 was about, and #731 asked not to
    * repeat.

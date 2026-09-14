@@ -22,12 +22,20 @@ name: CI
 # becomes `main`. Enabling the queue and choosing its batch size are repository
 # ruleset settings, deliberately left to maintainers; this trigger is the
 # workflow half GitHub requires once they enable it.
+#
+# `release` is the long-lived branch production is cut from
+# (docs/spec/runtime/releases.md). A fix PR against it runs here as a
+# `pull_request` like any other; a direct push to it runs like a push to
+# `main`. `workflow_dispatch` exists for `promote-main-to-release.yml`: the
+# merge commit it pushes is made with GITHUB_TOKEN, which never fires `push`
+# workflows (GitHub's recursion guard), so it dispatches this one explicitly.
 on:
   push:
-    branches: [main]
+    branches: [main, release]
   pull_request:
   merge_group:
     types: [checks_requested]
+  workflow_dispatch: {}
 
 # Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
 # the whole point: on a PR branch a new push makes the previous run's answer
@@ -202,9 +210,16 @@ jobs:
       # complete synthetic merge. The extra work is intentional — a batch may
       # combine unrelated Rust, console, and desktop changes, and only running
       # all three makes the required checks evidence for that combined state.
-      rust: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.rust }}
-      frontend: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.frontend }}
-      desktop: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.desktop }}
+      #
+      # `workflow_dispatch` is forced the same way, for the same reason from
+      # the other side: `promote-main-to-release.yml` dispatches this run on a
+      # fresh snapshot of main, and the filter's fallback for an event with no
+      # PR is a diff against the default branch — which for a just-promoted
+      # `release` is empty, so every lane would skip and the promotion would
+      # be green on nothing.
+      rust: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.rust }}
+      frontend: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.frontend }}
+      desktop: ${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && 'true' || steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -214,7 +229,7 @@ jobs:
       # selective runs. A merge group intentionally has no such PR context, and
       # the outputs above already select every lane for it.
       - id: filter
-        if: github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
@@ -229,9 +244,16 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'benches/**'
+              - 'examples/**'
+              # The member manifests (the host's declares its features and
+              # dependencies; the tui crate is a workspace member built by the
+              # bare cargo lines below).
+              - 'crates/opencompany-core/**'
+              - 'crates/opencompany-tui/**'
               # build.rs embeds these and declares rerun-if-changed on them.
               - 'companies/**'
-              # Read from CARGO_MANIFEST_DIR at test time.
+              - 'globals/**'
+              # Read relative to CARGO_MANIFEST_DIR at test time.
               - 'skills/**'
               - 'vendor/**'
               - '.gitmodules'
@@ -251,7 +273,7 @@ jobs:
               - 'scripts/release/**'
             desktop:
               - '.github/workflows/ci.yml'
-              - 'src-tauri/**'
+              - 'crates/opencompany-app/**'
 
   # The header above states an invariant. This job is what makes it one.
   #
@@ -280,7 +302,13 @@ jobs:
           # Match the `uses:` value only, ignoring prose that mentions "uses:"
           # inside a comment. Anchored to the step form: optional list dash,
           # the key, then the reference.
+          # A LOCAL reusable workflow — `uses: ./.github/workflows/x.yml` —
+          # takes no ref at all: it always runs at the calling workflow's
+          # own commit, so there is nothing an owner could move. Exempt by
+          # the leading `./`, and only that; `owner/repo/.github/workflows/
+          # x.yml@ref` is a remote workflow and still needs its SHA.
           unpinned=$(grep -rnE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*\./\.github/workflows/[^[:space:]]+\.ya?ml([[:space:]]|$|#)' \
             | grep -vE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$|#)' || true)
           if [ -n "$unpinned" ]; then
             echo "::error title=Unpinned action::A \`uses:\` reference names a tag or branch rather than a 40-hex commit SHA. A tag is a pointer its owner can move, so the job would run whatever it names at run time. Resolve it with: gh api repos/<owner>/<action>/commits/<tag> --jq .sha — then record the precise version in a trailing comment." >&2
@@ -298,9 +326,9 @@ jobs:
 
       # Issue #592, and the same argument as the pin check above. The vendored
       # openhuman submodule init was copied into four jobs in this file and a
-      # fifth in `release.yml`, ~340 lines apart here — far enough that a reader
-      # edits one copy and never learns the others exist. The copies then
-      # drifted: `release.yml` was missing `vendor/tinyhumans-sdk` and the
+      # fifth in the then release workflow, ~340 lines apart here — far enough
+      # that a reader edits one copy and never learns the others exist. The
+      # copies then drifted: the release copy was missing `vendor/tinyhumans-sdk` and the
       # nested `tinycortex` init, which fails `cargo build --locked` outright at
       # manifest resolution. It stayed invisible only because that workflow is
       # `workflow_dispatch`-only and had never run. This job's header records
@@ -356,15 +384,27 @@ jobs:
 
       # Issue #1738. The desktop's shipped feature set lives on three command
       # lines and in no manifest — `DESKTOP_RELEASE_FEATURES` in
-      # `release-desktop-macos.yml`, the `Desktop` lane's clippy and test steps
+      # `build-desktop.yml`, the `Desktop` lane's clippy and test steps
       # below, and `scripts/desktop-dev.sh`. Until #1738 the dev script had no
       # copy at all, so a developer ran the DEFAULT build and every user
       # installed the release one. Here rather than in the `Desktop` job because
       # this is a text check on repo config that needs no toolchain, and because
-      # `Desktop` is path-filtered on `src-tauri/**` — a drift introduced by
+      # `Desktop` is path-filtered on `crates/opencompany-app/**` — a drift introduced by
       # editing only a workflow or only the dev script would not run that lane.
       - name: Assert desktop feature sets agree
         run: scripts/ci/assert-desktop-features.sh
+
+      # Every file that carries the application version says the same thing.
+      # v0.1.5 shipped with `crates/opencompany-app/Cargo.toml` still at 0.1.4
+      # because a hand bump touched five files and missed the sixth; the
+      # release workflows now bump through `scripts/release/bump-version.mjs`,
+      # which refuses a drifted tree — so a drift has to be caught at the PR
+      # that introduces it, or it blocks the next release instead. Here, in
+      # the ungated job, for the reason the two checks above are: the seven
+      # files span the `rust`, `frontend` and `desktop` filters, and a PR that
+      # edits only one of them runs only one lane. Plain Node, no install.
+      - name: Assert every version file agrees
+        run: node scripts/release/verify-version-sync.mjs
 
   # The 500-line Markdown cap, asserted rather than trusted (issue #695), in a
   # job that always runs (issue #1974).
@@ -592,7 +632,7 @@ jobs:
       # the other ~1600 default tests under a feature that does not change them
       # would double the job's test time for no coverage.
       - name: Test the SQLite backend
-        run: cargo test --locked --features sqlite --lib store::sqlite
+        run: cargo test --locked -p opencompany-core --features sqlite --lib store::sqlite
 
       # Issue #770. Two more suites in the shape the SQLite step above rescued:
       # gated behind a feature, compiled by `Check (--all-features)`, and run by
@@ -710,7 +750,22 @@ jobs:
       # legitimately miss, and a missing binary here has to be a hard failure
       # rather than a silent rebuild somewhere it does not belong.
       - name: Build the host binary for the e2e lane
-        run: cargo build --locked --bin opencompany
+        run: cargo build --locked -p opencompany-core --bin opencompany
+
+      # The terminal client is a workspace member, so `cargo test --locked`
+      # above already compiled and ran its tests; this names a link failure of
+      # its own binary after its own crate rather than after the host's.
+      - name: Build the terminal client
+        run: cargo build --locked -p opencompany-tui --bin opencompany-tui
+
+      # The TUI owns two package features that are not part of the host's
+      # feature matrix. Exercise both so its embedded boot path and desktop
+      # storage selection remain checked by a real test lane.
+      - name: Test the terminal client harness feature
+        run: cargo test --locked -p opencompany-tui --features harness --lib
+
+      - name: Test the terminal client SQLite feature
+        run: cargo test --locked -p opencompany-tui --features sqlite --lib
 
       - name: Upload the host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1051,7 +1106,7 @@ jobs:
       # class of bug that motivated this job) surfaces before the lint pass
       # spends time on a tree that does not build.
       - name: Build (openhuman, tinymemory)
-        run: cargo build --locked --features openhuman --all-targets
+        run: cargo build --locked -p opencompany-core --features openhuman --all-targets
 
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
@@ -1060,7 +1115,7 @@ jobs:
       # gate would never reach first-party code. Scoping to the primary package
       # is what makes it meaningful.
       - name: Clippy (openhuman, tinymemory)
-        run: cargo clippy --locked --no-deps --features openhuman --all-targets -- -D warnings
+        run: cargo clippy --locked -p opencompany-core --no-deps --features openhuman --all-targets -- -D warnings
 
       # The route-authority matrix names its target explicitly, because a
       # bare `cargo test` reports success when it selects no tests at all —
@@ -1079,19 +1134,19 @@ jobs:
       # as the step above; the union set matches the test steps below, so the
       # compile is shared with them via the cache.
       - name: Clippy (acp, runner, tinymemory)
-        run: cargo clippy --locked --no-deps --features acp,runner,tinymemory --all-targets -- -D warnings
+        run: cargo clippy --locked -p opencompany-core --no-deps --features acp,runner,tinymemory --all-targets -- -D warnings
 
       # Issue #1524 (PR 1). The nested-vendor path deps must stay
       # byte-identical to openhuman's own, or cargo resolves the same crate
       # from two directories and two `MemoryProvider` traits exist in one
-      # process (the hazard recorded at `Cargo.toml:249-252`). `-d` prints
+      # process (the hazard the `[patch]` comment in the root `Cargo.toml` records). `-d` prints
       # duplicate versions of a package; any `tinymemory` line in that report
       # is the failure.
       - name: Assert no duplicated tinymemory crates
         run: |
           # Two separate failures, checked separately: a broken resolve must
           # fail loudly, not read as "no duplicates" through an empty pipe.
-          if ! report="$(cargo tree --locked -e normal --features openhuman,tinymemory -d)"; then
+          if ! report="$(cargo tree --locked -p opencompany-core -e normal --features openhuman,tinymemory -d)"; then
             echo "::error::cargo tree failed to resolve the graph"
             exit 1
           fi
@@ -1130,7 +1185,7 @@ jobs:
       # selects exactly the targets that assert: the lib and bin unit tests, plus
       # every integration target under `tests/`, present and future.
       - name: Test (openhuman, tinymemory)
-        run: cargo test --locked --features openhuman --tests
+        run: cargo test --locked -p opencompany-core --features openhuman --tests
 
       # The guard for the next one (issue #475). The step above runs whatever
       # `tests/` holds, but "ran the target" and "the target ran anything" are
@@ -1228,12 +1283,12 @@ jobs:
       # produce a green lane indistinguishable from a working one, and "nothing
       # dialled out" could not be told from "the jail was never locked".
       - name: Build the offline end-to-end target
-        run: cargo test --locked --features openhuman --test offline_e2e --no-run
+        run: cargo test --locked -p opencompany-core --features openhuman --test offline_e2e --no-run
 
       - name: Run it with no network at all
         run: |
           set -eu
-          binary="$(cargo test --locked --features openhuman --test offline_e2e \
+          binary="$(cargo test --locked -p opencompany-core --features openhuman --test offline_e2e \
             --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.executable != null and (.target.name == "offline_e2e")) | .executable' \
             | tail -n 1)"
@@ -1378,7 +1433,7 @@ jobs:
       # bin-resident is ever compile-only again (#1279 review: no lane ran
       # `cargo test --bin` at any feature set).
       - name: Bin tests (tinymemory)
-        run: cargo test --locked --features acp,runner,tinymemory --bin opencompany
+        run: cargo test --locked -p opencompany-core --features acp,runner,tinymemory --bin opencompany
 
       # These two steps run the same two halves under BARE `tinymemory` — the
       # provider contract with no `acp`/`runner`/`openhuman` baggage — so the
@@ -1447,7 +1502,7 @@ jobs:
       # this is a fifth distinct feature resolution, and without it this lane
       # would be the one place CI silently re-resolves the dependency graph.
       - name: Test (tinyplace)
-        run: cargo test --locked --features tinyplace --lib
+        run: cargo test --locked -p opencompany-core --features tinyplace --lib
 
       # `webhooks` gates `HttpWebhookSink` and its HMAC signer, and its tests
       # were compiled by `Check (--all-features)` and run by nothing. Scoped to
@@ -1455,7 +1510,7 @@ jobs:
       # resolution, and the rest of the suite is already covered by the lanes
       # above. `--locked` per issue #251, as for every graph-resolving call.
       - name: Test (webhooks)
-        run: cargo test --locked --features webhooks --lib server::webhook
+        run: cargo test --locked -p opencompany-core --features webhooks --lib server::webhook
 
   # Issue #1118. The gated host binary the `Console E2E (live brain)` job needs
   # is built HERE rather than as the last step of `Rust (openhuman, tinymemory)`
@@ -1528,7 +1583,7 @@ jobs:
       # `--bin`, not `--all-targets`: this job exists to produce one binary. The
       # tests and examples under this feature set are covered by the lane above.
       - name: Build the gated host binary for the live-brain e2e lane
-        run: cargo build --locked --features openhuman,mcp,composio --bin opencompany
+        run: cargo build --locked -p opencompany-core --features openhuman,mcp,composio --bin opencompany
 
       - name: Upload the gated host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1672,6 +1727,12 @@ jobs:
       # and the test is the one thing its own diff cannot run.
       - run: node --test scripts/release/generate-release-notes.test.mjs
 
+      # The version bump the release workflows run, exercised on a copy of the
+      # real version files — so a file growing a shape the script no longer
+      # matches fails here, not inside a release dispatch. (That the tree
+      # itself agrees is asserted in `actions-pinned`, the ungated job.)
+      - run: node --test scripts/release/bump-version.test.mjs
+
       # Exactly one Tauri app, and no script that picks it by working directory
       # rather than by name.
       #
@@ -1685,7 +1746,7 @@ jobs:
       #
       # Rides the `Console` job for the reason the cap above does: a policy
       # grep, no toolchain. It also guards `frontend/package.json`, this job's
-      # own file — and the `Desktop` lane is path-filtered on `src-tauri/**`, so
+      # own file — and the `Desktop` lane is path-filtered on `crates/opencompany-app/**`, so
       # a second app added under `frontend/` would not have triggered that lane
       # at all.
       - run: ./scripts/ci/assert-single-tauri-app.sh
@@ -2083,7 +2144,7 @@ jobs:
 
   # The desktop shell.
   #
-  # A SEPARATE JOB, and separate for the reason `src-tauri/Cargo.toml` explains
+  # A SEPARATE JOB, and separate for the reason `crates/opencompany-app/Cargo.toml` explains
   # at length: the crate is not a workspace member, so no `cargo` invocation in
   # the jobs above reaches it — not even `Check (--all-features)`, which
   # resolves only the root graph. Without this lane the desktop's Rust, its
@@ -2145,18 +2206,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
-            src-tauri
+            crates/opencompany-app
 
       # Issue #1298. This lane installs no toolchain of its own — unlike the
       # four `dtolnay/rust-toolchain` call sites elsewhere in this file — and
-      # does not need to: `src-tauri` has no `rust-toolchain.toml`, so rustup
+      # does not need to: `crates/opencompany-app` has no `rust-toolchain.toml`, so rustup
       # walks up to the repo root's and the cargo steps below run on the same
       # pinned version every other Rust lane uses. That is why
       # `assert-toolchain-pin.sh` finds nothing to check here; the pin still
       # applies. If this job ever grows an explicit install, it must pass the
       # same version, and the script will start covering it automatically.
       - name: Format
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+        run: cargo fmt --manifest-path crates/opencompany-app/Cargo.toml --all -- --check
 
       # `--no-deps`, matching the gated lane: the host is a path dependency and
       # its lints are that crate's business, not this one's.
@@ -2169,9 +2230,9 @@ jobs:
       # was an inconsistency inside one job rather than a deliberate choice.
       #
       # `--features` matches `DESKTOP_RELEASE_FEATURES` in
-      # `release-desktop-macos.yml` — see that file for why `acp` and
+      # `build-desktop.yml` — see that file for why `acp` and
       # `composio` are passed on the command line instead of being written into
-      # `src-tauri/Cargo.toml`. The short version: they are pure `cfg` switches
+      # `crates/opencompany-app/Cargo.toml`. The short version: they are pure `cfg` switches
       # that add no package, so the release build can turn them on and still
       # satisfy `--locked`, and the default build stays lean.
       #
@@ -2183,13 +2244,13 @@ jobs:
       # everybody reads as covered, selected by no lane. If the release
       # workflow's feature string changes, change it here in the same commit.
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --no-deps --features opencompany/acp,opencompany/composio -- -D warnings
+        run: cargo clippy --manifest-path crates/opencompany-app/Cargo.toml --locked --all-targets --no-deps --features opencompany-core/acp,opencompany-core/composio -- -D warnings
 
       # `--locked`, so a manifest edit whose lock was never regenerated is named
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`. The
       # `--features` are the release set, for the reason above the clippy step.
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --features opencompany/acp,opencompany/composio
+        run: cargo test --manifest-path crates/opencompany-app/Cargo.toml --locked --features opencompany-core/acp,opencompany-core/composio
 
       # There used to be a SECOND Tauri app here, `frontend/src-tauri/`, with
       # three more steps of its own. It is deleted, and its absence is the
@@ -2207,7 +2268,7 @@ jobs:
       # dead, and the working directory deciding which one a developer got.
       #
       # `frontend/package.json` now points `tauri:dev` at
-      # `scripts/desktop-dev.sh` and `tauri:build` at `src-tauri/`, and
+      # `scripts/desktop-dev.sh` and `tauri:build` at `crates/opencompany-app/`, and
       # `scripts/ci/assert-single-tauri-app.sh` in the `Console` job keeps both
       # halves from coming back.
 
@@ -2235,8 +2296,8 @@ jobs:
       # SUBMODULE's root once the hook lands inside one. So there is no hook: the
       # console is built explicitly, before packaging, by a step whose working
       # directory this file states outright. `frontendDist` stays relative to
-      # `src-tauri/`, which is where `tauri.conf.json` lives and is therefore the
-      # one path here that cannot drift.
+      # `crates/opencompany-app/`, which is where `tauri.conf.json` lives and is
+      # therefore the one path here that cannot drift.
       #
       # `--debug`, not a release build: this step exists to execute the config
       # and link a binary, and the `Test` step above already compiled that graph
@@ -2260,13 +2321,15 @@ jobs:
       # nearly free: same profile, same cache, everything already built.
       #
       # These two and no others: the CLI finds a project by searching SUBFOLDERS
-      # of the working directory rather than ancestors. That is what made the
-      # deleted `frontend/src-tauri/` wrapper reachable from `frontend/`, and
-      # running from these two directories is what keeps the shell the only app
-      # any invocation can find.
+      # of the working directory (to a depth of three) rather than ancestors.
+      # That is what made the deleted `frontend/src-tauri/` wrapper reachable
+      # from `frontend/`, and it is what still finds `crates/opencompany-app`
+      # from the root now that there is no `src-tauri/` short-circuit. Running
+      # from these two directories is what keeps the shell the only app any
+      # invocation can find.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 
-      - name: Package (from src-tauri)
-        working-directory: src-tauri
-        run: ../frontend/node_modules/.bin/tauri build --debug --no-bundle
+      - name: Package (from crates/opencompany-app)
+        working-directory: crates/opencompany-app
+        run: ../../frontend/node_modules/.bin/tauri build --debug --no-bundle

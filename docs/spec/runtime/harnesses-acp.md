@@ -39,7 +39,7 @@ storage ports use — and, concretely, why the port itself lives at
 not enable that feature. See that module's own docs for the full reasoning.
 
 `local` has a real implementation as of issue #1245 — `LocalAcpAgent`
-(`src-tauri/src/acp/local_agent.rs`), wired through `AppState::with_acp_agents`
+(`crates/opencompany-app/src/acp/local_agent.rs`), wired through `AppState::with_acp_agents`
 and `desktop::register`. `runner` does not yet: `src/runner/dispatch.rs`
 implements `AcpAgent` on `RunnerDispatch`, but nothing wires it into
 `lanes::build`, so a `runner`-transport harness resolves `unavailable` on

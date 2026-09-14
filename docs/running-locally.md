@@ -15,10 +15,13 @@ deploying the same images somewhere real.
 
 ## Before you start
 
-OpenCompany is a Rust 2024 crate: one configurable host. Business types are
-data, not code, just a `company.toml` manifest plus docs, and the operator
-console is a separate Vite app. See
+OpenCompany is a Rust 2024 Cargo workspace: one configurable host
+(`crates/opencompany-core`) plus the desktop and terminal shells that embed
+it. Business types are data, not code, just a `company.toml` manifest plus
+docs, and the operator console is a separate Vite app. See
 [repository-layout.md](repository-layout.md) for where everything lives.
+Commands that name a feature or a target name the package too
+(`-p opencompany-core`); the bare `cargo build`/`test` lines cover every member.
 
 A **TinyHumans API key** unlocks Medulla, the orchestrator. Without one you can
 still build, inspect, and explore every company in
@@ -39,13 +42,13 @@ git submodule update --init --recursive
 # 2. Build the host (the one configurable backend). `--features medulla`
 #    compiles in the hosted Medulla brain that `TINYHUMANS_API_KEY` unlocks;
 #    drop it for the small default build.
-cargo build --features medulla
+cargo build -p opencompany-core --features medulla
 
 # 3. Check a company definition before you launch it
 cargo run --bin opencompany -- check companies/marketing_agency
 
 # 4. Launch that company. Point --company at any folder under companies/
-cargo run --features medulla --bin opencompany -- serve --company companies/marketing_agency
+cargo run -p opencompany-core --features medulla --bin opencompany -- serve --company companies/marketing_agency
 ```
 
 The host is one configurable backend; each folder under
@@ -87,8 +90,8 @@ The default build is deliberately small; deeper capabilities sit behind Cargo
 features.
 
 ```sh
-cargo check --features tiny        # compile against vendored TinyAgents
-cargo check --features tinyplace   # tiny.place discovery and A2A surface
+cargo check -p opencompany-core --features tiny        # compile against vendored TinyAgents
+cargo check -p opencompany-core --features tinyplace   # tiny.place discovery and A2A surface
 ```
 
 Preview an OpenHuman launch without starting one:
@@ -116,7 +119,7 @@ into going public, which means registering a `@handle`, publishing an Agent
 Card, and answering inbound A2A `tasks/send` over SIWX + x402.
 
 ```sh
-cargo run --features tinyplace --bin opencompany -- \
+cargo run -p opencompany-core --features tinyplace --bin opencompany -- \
   serve --company companies/marketing_agency --discoverable
 ```
 

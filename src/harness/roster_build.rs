@@ -146,14 +146,24 @@ impl RosterBuilder {
                 .map_or(crate::company::Credential::None, |key| {
                     crate::company::Credential::from_value(key.to_string())
                 });
+            // The attribution headers come from the catalogue, not from a
+            // literal here. This block used to spell the referer
+            // `https://opencompany.ai` while the turn path
+            // (`harness::built_in::provider`) sent
+            // `https://opencompany.tinyhumans.ai`, so one company's traffic
+            // arrived in OpenRouter's dashboard as two apps. Nothing compared
+            // the two copies, which is exactly why there were two.
             let extra_headers =
                 if crate::company::inference::normalize_provider(provider) == "openrouter" {
                     vec![
                         (
                             "HTTP-Referer".to_string(),
-                            "https://opencompany.ai".to_string(),
+                            crate::company::inference::catalogue::OPENROUTER_REFERER.to_string(),
                         ),
-                        ("X-Title".to_string(), "OpenCompany".to_string()),
+                        (
+                            "X-Title".to_string(),
+                            crate::company::inference::catalogue::OPENROUTER_TITLE.to_string(),
+                        ),
                     ]
                 } else {
                     Vec::new()
@@ -360,7 +370,7 @@ impl RosterBuilder {
         let request = ModelRequest {
             messages: vec![Message::system(system_prompt()), message],
             model: Some(self.model_name.clone()),
-            temperature: Some(0.0),
+            temperature: Some(crate::company::inference::dialect::DETERMINISTIC),
             max_tokens: Some(MAX_OUTPUT_TOKENS),
             ..ModelRequest::default()
         };

@@ -108,7 +108,7 @@ carrying the same `error` default the binary had before this constant existed, s
 one unparseable directive drops itself rather than the operator's whole
 configuration, and an empty value still reports errors rather than silencing the
 binary outright. The desktop shell
-(`src-tauri/src/lib.rs`) names the same target for a sharper reason: its fallback
+(`crates/opencompany-app/src/lib.rs`) names the same target for a sharper reason: its fallback
 has no global directive at all, so an unnamed target is dropped at every level
 including `error`.
 

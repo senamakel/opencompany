@@ -2,7 +2,7 @@
 # Assemble latest.json — the file every installed desktop client polls.
 #
 # The Tauri updater fetches the JSON manifest named by `plugins.updater.endpoints`
-# in `src-tauri/tauri.conf.json`, compares its `version` with the running
+# in `crates/opencompany-app/tauri.conf.json`, compares its `version` with the running
 # application's, and — when it is newer — downloads the entry for this machine's
 # platform and verifies it against the signature in the same entry.
 #
@@ -14,7 +14,7 @@
 # ## It runs before the release is published, and that is load-bearing
 #
 # This repository has immutable releases enabled: publishing freezes the asset
-# list, and nothing can be added afterwards. `release-desktop-macos.yml`
+# list, and nothing can be added afterwards. `build-desktop.yml`
 # therefore uploads every DMG and update archive to a DRAFT and publishes it
 # last — so this script has to write latest.json into the draft, in the window
 # between the builds finishing and the draft going public. A release published
@@ -27,7 +27,7 @@
 #
 # Optional:
 #   VERSION      the bare version. Defaults to TAG without its leading `v`, and
-#                is asserted against src-tauri/tauri.conf.json either way — a
+#                is asserted against crates/opencompany-app/tauri.conf.json either way — a
 #                manifest whose `version` does not match the application inside
 #                the archive is an update every client takes and then re-offers.
 set -euo pipefail
@@ -37,12 +37,12 @@ set -euo pipefail
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONF="$REPO_ROOT/src-tauri/tauri.conf.json"
+CONF="$REPO_ROOT/crates/opencompany-app/tauri.conf.json"
 
 VERSION="${VERSION:-${TAG#v}}"
 BUILT_VERSION="$(jq -r '.version' "$CONF")"
 if [ "$VERSION" != "$BUILT_VERSION" ]; then
-  echo "::error::latest.json would advertise $VERSION but the application in this release is $BUILT_VERSION (src-tauri/tauri.conf.json). A client would install the update and immediately be offered it again." >&2
+  echo "::error::latest.json would advertise $VERSION but the application in this release is $BUILT_VERSION (crates/opencompany-app/tauri.conf.json). A client would install the update and immediately be offered it again." >&2
   exit 1
 fi
 
@@ -88,7 +88,7 @@ read_signature() {
 }
 
 # The platform keys the updater looks itself up under. macOS only, because
-# `release-desktop-macos.yml` is the only desktop release path there is — a
+# `build-desktop.yml` is the only desktop release path there is — a
 # Windows or Linux client would find no entry for its target and report no
 # update, which is the honest answer while no such build is published.
 # See docs/spec/runtime/desktop-updates.md.

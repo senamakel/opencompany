@@ -410,7 +410,7 @@ mod test {
     fn the_consoles_pre_flight_says_the_same_thing() {
         const CONSOLE_DIALOG: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/frontend/src/views/WorkflowCreateDialog.tsx"
+            "/../../frontend/src/views/WorkflowCreateDialog.tsx"
         ));
         const TAIL: &str = "is not an automation delivery channel — this runtime has:";
 

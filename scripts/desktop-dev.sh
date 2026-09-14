@@ -5,7 +5,7 @@
 #
 # A debug build of the shell loads `devUrl` (`http://localhost:5173`) rather
 # than the embedded bundle, so without a dev server the window is blank. The
-# obvious fix is `build.beforeDevCommand` in `src-tauri/tauri.conf.json`, and
+# obvious fix is `build.beforeDevCommand` in `crates/opencompany-app/tauri.conf.json`, and
 # it is wrong: the Tauri CLI runs that hook from a directory it *derives* by
 # scanning for a `package.json`, and which one it picks is not stable — on a
 # macOS checkout it lands in `frontend/`, on CI's runner it landed in
@@ -154,7 +154,7 @@ fi
 # comment cannot be picked up instead. A miss is fatal rather than a silent
 # fall-back to no features: that would restore the very divergence this exists
 # to close, and do it quietly.
-RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/release-desktop-macos.yml"
+RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-desktop.yml"
 # An explicitly-set `DESKTOP_FEATURES` wins, even when empty — that is someone
 # deliberately asking for the leaner build. Only an UNSET one is read from the
 # workflow, and a read that finds nothing is fatal: falling back to no features
@@ -180,7 +180,7 @@ else
 fi
 
 # The CLI from `frontend/node_modules`, as `ci.yml` uses, falling back to a
-# `cargo install`ed one. Run from `src-tauri` so the CLI finds this project:
+# `cargo install`ed one. Run from `crates/opencompany-app` so the CLI finds this project:
 # it searches *subfolders* of the working directory, so from `frontend/` it
 # would pick the console wrapper in `frontend/src-tauri/` instead — a different
 # application that happens to share this one's `productName`.
@@ -191,7 +191,7 @@ fi
 # runner is cargo to see that the features land anywhere. `tauri build` has no
 # such flag, which is why the workflow spells it the other way.
 TAURI_CLI="${REPO_ROOT}/frontend/node_modules/.bin/tauri"
-cd "${REPO_ROOT}/src-tauri"
+cd "${REPO_ROOT}/crates/opencompany-app"
 if [ -n "${DESKTOP_FEATURES}" ]; then
     set -- --features "${DESKTOP_FEATURES}"
 else

@@ -2,8 +2,21 @@
 
 ## Project Structure & Module Organization
 
-OpenCompany is a Rust 2024 crate rooted at `Cargo.toml`. Rust source lives
-under `src/`. Public module surfaces live in source module directories:
+OpenCompany is a Rust 2024 Cargo workspace rooted at `Cargo.toml`, with one
+manifest per flavour under `crates/`:
+
+- `crates/opencompany-core`: the host — package `opencompany-core`, library
+  crate `opencompany`, binary `opencompany`. Its sources still live at the
+  repository root (`src/`, `tests/`, `benches/`, `examples/`, `build.rs`) and
+  the member manifest points at them; moving them under the crate is a
+  follow-up, deliberately deferred while many branches touch `src/`. Every
+  `src/...` path in this file and under `docs/` is that tree.
+- `crates/opencompany-app`: the Tauri desktop shell. Excluded from the
+  workspace on purpose (its manifest says why); it has its own `Cargo.lock`.
+- `crates/opencompany-tui`: the terminal client, embedding the host.
+
+Rust source for the host lives under `src/`. Public module surfaces live in
+source module directories:
 
 - `src/app/`: runtime configuration and shared Axum state
 - `src/server/`: Axum router and HTTP handlers
@@ -40,13 +53,15 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
+- `cargo run -p opencompany-tui`: run the terminal client over the default data root.
 - `./scripts/dump-prompt.sh --company companies/<name>`: print the system prompt each agent in that bundle is built with (`docs/spec/runtime/agents.md`).
 - `git submodule update --init vendor/openhuman`: initialize OpenHuman.
 - `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
-- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
+- `cargo check -p opencompany-core --features tiny`: compile against OpenHuman's TinyAgents pin.
 
-Run commands from the repository root unless a future workspace layout changes
-the module location.
+Run commands from the repository root. A command that names a feature or a
+target names the package too (`-p opencompany-core --features ...`); the bare
+`cargo fmt`/`clippy`/`test` lines cover every workspace member.
 
 `rust-toolchain.toml` pins an **explicit** Rust version (issue #1298), and
 every `dtolnay/rust-toolchain` call site in `.github/workflows/` passes that

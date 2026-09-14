@@ -8,7 +8,7 @@ target/
 
 # vendor/openhuman (and its own nested vendored crates under vendor/openhuman/
 # vendor/*) back the root Cargo.toml's [patch.crates-io] table and the optional
-# `openhuman_core` path dependency. Cargo must read their Cargo.toml manifests
+# `openhuman_core` path dependency in crates/opencompany-core/Cargo.toml. Cargo must read their Cargo.toml manifests
 # AND their lib sources during *resolution* — even for the default/offline and
 # mongodb/medulla builds where the `openhuman` feature is off — so the whole
 # tree cannot be excluded (that was the packaging bug: `cargo build` failed with
@@ -33,6 +33,8 @@ target/
 **/paper/
 **/wiki/
 vendor/openhuman/app/
+# The desktop shell is excluded from the workspace and never part of the image.
+crates/opencompany-app/
 vendor/openhuman/tests/
 vendor/openhuman/e2e/
 vendor/openhuman/fastlane/

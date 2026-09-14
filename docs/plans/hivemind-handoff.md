@@ -19,7 +19,7 @@ state.
   be counted as a supporter. Off by default. `MentionTurnQueue` is reached
   through `reach = "local"` rather than wired separately — the library asserts
   that decision is identical, and two queues that must agree is worse than one.
-- Desktop CI needed `src-tauri/Cargo.lock` refreshed for the new
+- Desktop CI needed `crates/opencompany-app/Cargo.lock` refreshed for the new
   `tinyhivemind-hive` dependency, and `scripts/__pycache__` was committed by
   accident; both are fixed, with `__pycache__/` now ignored.
 - An OpenHuman bump is a migration (harness APIs move); fix our side, never

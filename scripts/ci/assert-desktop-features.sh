@@ -3,11 +3,11 @@
 # Fail if the desktop's shipped cargo feature set is not the one CI compiles and
 # not the one `scripts/desktop-dev.sh` runs.
 #
-# Issue #1738. `src-tauri/Cargo.toml`'s feature list is NOT what the desktop
+# Issue #1738. `crates/opencompany-app/Cargo.toml`'s feature list is NOT what the desktop
 # ships. `acp` and `composio` are passed on the `tauri` command line — both are
 # `= ["openhuman"]` in the root manifest, pure `cfg` switches adding no package,
 # so a release can turn them on and still build `--locked`; the argument is on
-# the `DESKTOP_RELEASE_FEATURES` env block in `release-desktop-macos.yml`.
+# the `DESKTOP_RELEASE_FEATURES` env block in `build-desktop.yml`.
 #
 # The cost of that is three copies of one string, and until #1738 there were
 # only two: the dev script ran `tauri dev` bare. So a developer's desktop was
@@ -24,12 +24,12 @@
 # user.
 #
 # To change the shipped set: edit `DESKTOP_RELEASE_FEATURES` in
-# `release-desktop-macos.yml`, run this script, and fix whatever it names.
+# `build-desktop.yml`, run this script, and fix whatever it names.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-RELEASE_WORKFLOW=.github/workflows/release-desktop-macos.yml
+RELEASE_WORKFLOW=.github/workflows/build-desktop.yml
 CI_WORKFLOW=.github/workflows/ci.yml
 DEV_SCRIPT=scripts/desktop-dev.sh
 CONSOLE_MANIFEST=frontend/package.json
@@ -131,9 +131,9 @@ check() {
 # the script would report the remaining step as "ok" and exit 0. The one thing
 # this exists to catch — a call site compiling the default set — was the one
 # thing it skipped.
-ci_lines="$(grep -nE 'cargo (clippy|test|check|build)[^|]*--manifest-path src-tauri/Cargo.toml' "$CI_WORKFLOW" || true)"
+ci_lines="$(grep -nE 'cargo (clippy|test|check|build)[^|]*--manifest-path crates/opencompany-app/Cargo.toml' "$CI_WORKFLOW" || true)"
 if [ -z "$ci_lines" ]; then
-  echo "assert-desktop-features: no cargo command against src-tauri/Cargo.toml in $CI_WORKFLOW." >&2
+  echo "assert-desktop-features: no cargo command against crates/opencompany-app/Cargo.toml in $CI_WORKFLOW." >&2
   echo "  Either the Desktop lane stopped compiling the shell, or this script's" >&2
   echo "  pattern is stale. Both need a human." >&2
   exit 1
@@ -167,14 +167,14 @@ done <<< "$ci_lines"
 dev_code="$(grep -vE '^[[:space:]]*#' "$DEV_SCRIPT")"
 dev_names_workflow=0
 dev_extracts_key=0
-printf '%s' "$dev_code" | grep -q 'release-desktop-macos.yml' && dev_names_workflow=1
+printf '%s' "$dev_code" | grep -q 'build-desktop.yml' && dev_names_workflow=1
 # The extraction itself: executable code that pulls the key out of something.
 printf '%s' "$dev_code" | grep -qE '(sed|awk|grep|rg)[^|]*DESKTOP_RELEASE_FEATURES' && dev_extracts_key=1
 if [ "$dev_names_workflow" -eq 1 ] && [ "$dev_extracts_key" -eq 1 ]; then
   echo "  ok  $DEV_SCRIPT derives the features from $RELEASE_WORKFLOW"
 else
   echo "  BAD $DEV_SCRIPT no longer extracts DESKTOP_RELEASE_FEATURES from the release workflow in code" >&2
-  [ "$dev_names_workflow" -eq 1 ] || echo "        (no executable line names release-desktop-macos.yml)" >&2
+  [ "$dev_names_workflow" -eq 1 ] || echo "        (no executable line names build-desktop.yml)" >&2
   [ "$dev_extracts_key" -eq 1 ] || echo "        (no executable line extracts DESKTOP_RELEASE_FEATURES)" >&2
   status=1
 fi
@@ -184,7 +184,7 @@ fi
 # the whole reason this script exists is that such copies drift. Comments may
 # name the features; a shell assignment may not.
 dev_literal="$(
-  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '=[^|]*opencompany/[a-z-]+' || true
+  grep -vE '^[[:space:]]*#' "$DEV_SCRIPT" | grep -nE '=[^|]*opencompany-core/[a-z-]+' || true
 )"
 if [ -n "$dev_literal" ]; then
   echo "  BAD $DEV_SCRIPT hardcodes a feature literal instead of reading the workflow:" >&2

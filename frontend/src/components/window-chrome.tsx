@@ -1,7 +1,7 @@
 // The desktop window's own chrome: what replaces the native title bar once the
 // window stops drawing one.
 //
-// `src-tauri/tauri.conf.json` runs the main window with `titleBarStyle:
+// `crates/opencompany-app/tauri.conf.json` runs the main window with `titleBarStyle:
 // "Overlay"` and `hiddenTitle: true`, which is macOS's transparent title bar:
 // the bar itself is gone, the traffic lights float over the web content, and
 // the window keeps its rounded corners and its resize edges. Two things stop
@@ -71,7 +71,7 @@ export const WINDOW_CONTROLS_WIDTH = 72;
 /**
  * Whether the shell hides the native title bar and draws its own.
  *
- * **This must agree with `src-tauri/tauri.conf.json`.** The window runs with
+ * **This must agree with `crates/opencompany-app/tauri.conf.json`.** The window runs with
  * `decorations: true` and no `titleBarStyle`, so macOS draws an ordinary title
  * bar and the traffic lights sit in it — there is nothing for the console to
  * reserve space for or make draggable, and both {@link WindowDragBar} and

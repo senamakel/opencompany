@@ -8,7 +8,8 @@ durable and consistent, drives it with **Medulla** (TinyHumans' hosted
 orchestrator-first model), and makes every company a first-class, discoverable
 citizen of the **tiny.place** agent economy.
 
-Two personas are served by the same crate:
+Two personas are served by the same host crate (`crates/opencompany-core`;
+see [repository-layout.md](../repository-layout.md) for the crate layout):
 
 - **Prosumer operator** — a non-technical person running a one-person
   business. Installs one binary, pastes one key (`TINYHUMANS_API_KEY`), picks
@@ -120,6 +121,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [runtime/desktop-instances.md](runtime/desktop-instances.md) | Several local hosts on one machine: the roster, onboarding, dev runs |
 | [runtime/desktop-updates.md](runtime/desktop-updates.md) | Desktop auto-update: the silent-until-actionable prompt, the signed release artifacts, and the keypair an operator must generate before any of it works |
+| [runtime/releases.md](runtime/releases.md) | Cutting a release: promote main to `release`, a staging cut, a production cut — one dispatch each, the version computed rather than typed |
 | [runtime/connectors.md](runtime/connectors.md) | Connectors: choosing where the runtime runs — this computer, TinyHumans Cloud, a remote gateway, or over SSH |
 | [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/analytics.md](runtime/analytics.md) | Product analytics: hosted tenants only, opaque identity, shape-not-content payloads, a self-hosted OpenPanel collector, and the switch that turns it off |

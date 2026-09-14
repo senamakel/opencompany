@@ -3,7 +3,7 @@
 # Render every shipped icon from the vector sources in docs/brand/logo/.
 #
 # The SVGs are the authority; everything under frontend/public/ and
-# src-tauri/icons/ is generated. Re-run this after changing a source rather
+# crates/opencompany-app/icons/ is generated. Re-run this after changing a source rather
 # than hand-editing a PNG, so the set cannot drift apart one file at a time.
 #
 #   scripts/brand/generate-icons.sh
@@ -47,19 +47,19 @@ render icon-square 512 "$public/maskable-512x512.png"
 for s in 16 32 48; do render icon "$s" "$work/ico-$s.png"; done
 python3 "$root/scripts/brand/build_ico.py" "$work" "$public/favicon.ico"
 
-echo "==> src-tauri/icons"
+echo "==> crates/opencompany-app/icons"
 # Everything this script writes is reproducible except icons/icon.icns, which
 # `tauri icon` re-encodes to different bytes at the same size on every run. So
 # a re-run always shows one 135 KB binary diff even when no source changed —
 # that is the tool, not a real change, and it is safe to check out over.
 render icon 1024 "$work/tauri-source.png"
-(cd "$root" && cargo tauri icon "$work/tauri-source.png" --output src-tauri/icons)
+(cd "$root" && cargo tauri icon "$work/tauri-source.png" --output crates/opencompany-app/icons)
 
 # `tauri icon` always writes the iOS and Android sets too. This app ships
 # desktop only — tauri.conf.json names none of them — so they are thirty-odd
 # PNGs that would be committed, reviewed and never read. Delete them here
 # rather than leaving each re-run to reintroduce them. If mobile is ever
 # targeted, drop these two lines and the sets come back.
-rm -rf "$root/src-tauri/icons/android" "$root/src-tauri/icons/ios"
+rm -rf "$root/crates/opencompany-app/icons/android" "$root/crates/opencompany-app/icons/ios"
 
 echo "done"

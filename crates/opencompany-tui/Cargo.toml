@@ -1,0 +1,47 @@
+# The terminal client — the "tui" flavour of OpenCompany beside
+# `opencompany-core` (the host) and `opencompany-app` (the desktop shell).
+#
+# It is the desktop app's shape in a terminal: the host is LINKED and booted
+# in-process over a data root, exactly as `crates/opencompany-app/src/embedded.rs`
+# does, rather than spawned or dialled over HTTP. What the screen shows is read
+# straight off the host's `AppState`.
+#
+# Default features keep this crate as offline and echo-brained as the host's own
+# default lane, so the workspace-wide `cargo test --locked` does not pull the
+# embedded OpenHuman runtime into the graph. `harness` is the opt-in that lets a
+# company's agents reach a model — the same shape as the desktop's `mcp`.
+[package]
+name = "opencompany-tui"
+description = "OpenCompany terminal client: the host, embedded, in a ratatui screen."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "opencompany-tui"
+path = "src/main.rs"
+
+[dependencies]
+# The package is `opencompany-core`; its library crate is still named
+# `opencompany`, which is why the code says `use opencompany::`.
+opencompany-core = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The versions the vendored OpenHuman runtime's own `tui` feature pins, so a
+# build that enables both links one copy of each.
+ratatui = "0.30"
+crossterm = "0.29"
+
+[features]
+default = []
+# Compiles the embedded agent harness into the host so a company's agents can
+# think. Also switches on the two boot-time registrations `src/host.rs` makes
+# only when the harness is present (keyring pin, product identity).
+harness = ["opencompany-core/mcp"]
+# SQLite-backed stores for the host, as the desktop ships.
+sqlite = ["opencompany-core/sqlite"]

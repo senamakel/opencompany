@@ -75,7 +75,7 @@ backend_output=$(PATH="${TMP_DIR}:$PATH" \
     OPENCOMPANY_FEATURES="sqlite tiny" \
     "${SCRIPT_DIR}/run-demo-backend.sh")
 printf '%s\n' "$backend_output" | grep -F \
-    "cargo_args=run --bin opencompany --features sqlite tiny -- serve --company companies/marketing_agency" \
+    "cargo_args=run -p opencompany-core --bin opencompany --features sqlite tiny -- serve --company companies/marketing_agency" \
     >/dev/null
 
 echo "launch-demo tests passed"

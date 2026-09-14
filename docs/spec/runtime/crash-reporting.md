@@ -363,10 +363,10 @@ Named so they are countable rather than implied.
   traces stay unsymbolicated until a `sentry-cli upload-dif` step exists. See
   the note under [Source-map upload](#source-map-upload-ci-only).
 - **The desktop app reports nothing, from either half.** The console bundle
-  inside the shell is blocked by `src-tauri/tauri.conf.json`'s
+  inside the shell is blocked by `crates/opencompany-app/tauri.conf.json`'s
   `connect-src 'self' ipc:`, and widening that CSP is a security decision of its
   own. The embedded *host* would report if the feature were compiled in, but
-  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/release-desktop-macos.yml`
+  `DESKTOP_RELEASE_FEATURES` in `.github/workflows/build-desktop.yml`
   does not include `crash-reporting`, so the released binary has no client
   either. Adding it there is a distribution decision — it changes what ships to
   end users rather than to operators — and is deliberately left open.
@@ -388,7 +388,7 @@ Named so they are countable rather than implied.
   agree as this is written, and they agree only because someone kept them that
   way: no check compares them, so a release that bumps one and forgets the
   other drifts them silently and nothing reports it. That is not hypothetical —
-  `chore(release): 0.1.1` bumped `Cargo.toml`, both `src-tauri` manifests and
+  `chore(release): 0.1.1` bumped `Cargo.toml`, both `crates/opencompany-app` manifests and
   `tauri.conf.json`, missed `frontend/package.json`, and the gap was found in
   review rather than by any lane. The commit half still matches for a build that
   sets `OPENCOMPANY_BUILD_COMMIT` / `VITE_BUILD_COMMIT`, which is what actually

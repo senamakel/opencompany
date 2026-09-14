@@ -138,7 +138,7 @@ name-shaped string that is not a name.
 
 On the desktop, the profile dialog offers what the machine already knows: the
 account's full name, and its account picture. Read through
-`oc_device_identity` → `src-tauri/src/identity.rs`, per platform (GECOS on Linux,
+`oc_device_identity` → `crates/opencompany-app/src/identity.rs`, per platform (GECOS on Linux,
 `dscl` on macOS, `%PUBLIC%\AccountPictures` on Windows), every field optional and
 every failure silently `None`.
 

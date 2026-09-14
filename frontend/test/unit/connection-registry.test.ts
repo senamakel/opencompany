@@ -610,7 +610,7 @@ describe("a same-origin profile", () => {
  * A credential is not sent to a host anyone on the path can read.
  *
  * Issue #731. The core is what enforces this — `may_carry_a_credential` in
- * `src-tauri/src/proxy/mod.rs`, which a console-side check cannot be a
+ * `crates/opencompany-app/src/proxy/mod.rs`, which a console-side check cannot be a
  * substitute for, since anything invoking `oc_connect` directly bypasses this
  * module entirely. What is under test here is the *other* half: that the
  * console asks the question before it contacts anything, so the row names the

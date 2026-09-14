@@ -8,6 +8,7 @@ import { CrashFallback } from "@/components/crash-fallback";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { purgeStoredSmtpPasswords } from "@/lib/domain";
+import { installExternalLinkOpener } from "@/lib/external-links";
 import { startScrollActivity } from "@/lib/scroll-activity";
 import { initSentry, isReporting } from "@/lib/sentry";
 import "./index.css";
@@ -74,6 +75,14 @@ initSentry();
 // mark the themed scrollbars in `index.css` lift on. Outside React on purpose,
 // so StrictMode's double-invoked effects cannot arm it twice.
 startScrollActivity();
+
+// Outward links reach the operator's browser in the desktop shell (issue
+// #2282). Armed the same way and for the same reason as the scroll listener
+// above: one capturing listener for the life of the document, outside React so
+// StrictMode cannot arm it twice, and covering anchors mounted long after boot
+// — including ones nobody has written yet. Inert in a browser, where an anchor
+// already does the right thing.
+installExternalLinkOpener();
 
 // Deletes SMTP passwords the pre-#1460 console wrote to localStorage, before
 // the first render and therefore before anything can read one back. At boot

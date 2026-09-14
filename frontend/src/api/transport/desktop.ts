@@ -628,7 +628,7 @@ export interface AppUpdateStaged {
  * **Never rejects.** The core already answers "no update" for every failure —
  * offline, endpoint down, a build carrying no signing key — and this runs on a
  * background timer nobody asked for, so an error here would be one nobody could
- * act on. See `oc_app_update_check` in `src-tauri/src/commands.rs`.
+ * act on. See `oc_app_update_check` in `crates/opencompany-app/src/commands.rs`.
  */
 export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
   const desktop = tauriCore();

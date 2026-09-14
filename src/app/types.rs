@@ -1691,7 +1691,7 @@ mod tests {
     #[test]
     fn skill_registry_loads_the_repo_library_and_caches() {
         let state = AppState::new(AppConfig::default());
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
 
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));

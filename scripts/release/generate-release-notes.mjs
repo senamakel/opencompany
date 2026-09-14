@@ -14,7 +14,7 @@
 //
 // TWO RENDERERS, and the AI one is not required. `--no-ai` produces the whole
 // document deterministically from the keyword groups below; the OpenAI path
-// only rewrites that same payload into prose. `release.yml` calls the AI path
+// only rewrites that same payload into prose. `release-production.yml` calls the AI path
 // first and falls back to `--no-ai` on any failure, so a missing or rate-limited
 // `OPENAI_API_KEY` degrades the notes rather than failing the release.
 //
@@ -591,7 +591,7 @@ async function summarizeWithOpenAi(request) {
   // A reasoning model on a hundred-PR payload is minutes, not seconds. The
   // abort matters because `fetch` has no default timeout: without it a hung
   // connection holds the release job open until the job timeout, and the
-  // `--no-ai` fallback in `release.yml` never gets its turn.
+  // `--no-ai` fallback in `release-production.yml` never gets its turn.
   const timeoutMs = 300_000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -843,7 +843,7 @@ async function main() {
   // An EMPTY RANGE is an error, not a document. Re-dispatching a release whose
   // tag is already the latest published one makes start and end the same
   // commit, and without this the generator cheerfully renders "0 PRs across 0
-  // commits" and `release.yml` publishes that as the release body. Failing here
+  // commits" and `release-production.yml` publishes that as the release body. Failing here
   // takes the deterministic fallback down with it, which is the intent: the
   // range is wrong, and a release should not be cut with empty notes.
   if (commits.length === 0) {

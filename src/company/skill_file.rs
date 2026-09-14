@@ -229,11 +229,11 @@ mod tests {
 
     const WEB_RESEARCH: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/skills/web-research/SKILL.md"
+        "/../../skills/web-research/SKILL.md"
     ));
     const WEEKLY_REPORT: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/skills/weekly-report/SKILL.md"
+        "/../../skills/weekly-report/SKILL.md"
     ));
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn every_shipped_repo_skill_carries_a_version() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
         let docs = load_dir_skills(&dir).expect("the shared registry parses");
         assert!(!docs.is_empty(), "the shared registry is not empty");
         for doc in &docs {
@@ -358,7 +358,7 @@ mod tests {
         // canonical form. Pinning that here turns the one lossy case — an
         // unknown frontmatter key, which the parser tolerates but the renderer
         // drops — into a CI failure instead of a silent loss at install time.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
         for doc in load_dir_skills(&dir).expect("the shared registry parses") {
             let file = dir.join(&doc.slug).join("SKILL.md");
             let src = std::fs::read_to_string(&file).expect("readable");

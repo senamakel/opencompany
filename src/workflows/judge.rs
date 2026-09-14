@@ -182,7 +182,7 @@ pub async fn judge_sufficiency(
             Message::user(user_prompt(input)),
         ],
         model: Some(model),
-        temperature: Some(0.0),
+        temperature: Some(crate::company::inference::dialect::DETERMINISTIC),
         max_tokens: Some(MAX_OUTPUT_TOKENS),
         ..ModelRequest::default()
     };

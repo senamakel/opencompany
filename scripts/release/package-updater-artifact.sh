@@ -45,7 +45,7 @@ OUT_DIR="${3:?}"
 : "${TAURI_SIGNING_PRIVATE_KEY:?TAURI_SIGNING_PRIVATE_KEY is required to sign the update archive}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONF="$REPO_ROOT/src-tauri/tauri.conf.json"
+CONF="$REPO_ROOT/crates/opencompany-app/tauri.conf.json"
 TAURI_CLI="$REPO_ROOT/frontend/node_modules/.bin/tauri"
 
 if [ ! -x "$TAURI_CLI" ]; then

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
+  ExternalLink,
   KeyRound,
   Loader2,
   Plug,
@@ -26,12 +27,22 @@ import { classifyLoadFailure } from "@/lib/section-load";
 import { SectionUnreachable } from "@/views/connections/SectionUnreachable";
 import { GrantNamespace } from "@/components/grant-namespace";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+
+/**
+ * Where a BYOK key comes from.
+ *
+ * The bare host the field's own copy names, not a deep link into the settings
+ * page that mints the key: that path is the vendor's to move, and a stale one
+ * strands the operator on a 404 *after* a sign-in that worked — which is worse
+ * than the landing page they can navigate from themselves.
+ */
+const COMPOSIO_DASHBOARD_URL = "https://app.composio.dev";
 import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
 
 /**
@@ -42,7 +53,10 @@ import { COMPOSIO_MANAGED_HIDDEN } from "@/product-scope";
  * here even when it is not offered: this is what labels the route a company is
  * already on.
  */
-const MODES: Record<ComposioMode, { label: string; blurb: string; billed: string }> = {
+const MODES: Record<
+  ComposioMode,
+  { label: string; blurb: string; billed: string }
+> = {
   managed: {
     label: "OpenHuman-managed",
     blurb:
@@ -197,7 +211,12 @@ interface Props {
  * takes effect on the agents' next turn, no restart. Hidden entirely when the
  * feature is not in the build.
  */
-export function ComposioSection({ client, company, canManage, onChanged }: Props) {
+export function ComposioSection({
+  client,
+  company,
+  canManage,
+  onChanged,
+}: Props) {
   const [load, setLoad] = useState<
     "loading" | "ready" | "unavailable" | "unconfigured" | "error"
   >("loading");
@@ -285,7 +304,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       toast.success(res.note);
       onChanged();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not save the token.");
+      toast.error(
+        err instanceof ApiError ? err.message : "Could not save the token.",
+      );
     } finally {
       setBusy(null);
     }
@@ -302,7 +323,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       toast.success(res.note);
       onChanged();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
+      toast.error(
+        err instanceof ApiError ? err.message : "Could not clear the token.",
+      );
     } finally {
       setBusy(null);
     }
@@ -328,7 +351,11 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       toast.success(res.note);
       onChanged();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not save the Composio API key.");
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Could not save the Composio API key.",
+      );
     } finally {
       setBusy(null);
     }
@@ -347,7 +374,11 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
       toast.success(res.note);
       onChanged();
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not clear the Composio API key.");
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Could not clear the Composio API key.",
+      );
     } finally {
       setBusy(null);
     }
@@ -364,7 +395,9 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
   function requestApiKeySave() {
     if (persistedMode === "managed") {
       confirmOpenerRef.current =
-        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
       setConfirmSwitch(true);
       return;
     }
@@ -384,9 +417,15 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
    */
   function handleModeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (busy !== null) return;
-    if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)) return;
-    const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
-    const focused = modeButtons.current.indexOf(event.target as HTMLButtonElement);
+    if (
+      !["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)
+    )
+      return;
+    const step =
+      event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+    const focused = modeButtons.current.indexOf(
+      event.target as HTMLButtonElement,
+    );
     if (focused === -1) return;
     event.preventDefault();
     const next = (focused + step + MODE_ORDER.length) % MODE_ORDER.length;
@@ -488,27 +527,33 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                 // filed about, one route over.
                 status.credentialSource === "none" ? (
                   <span className="inline-flex items-center gap-1 text-xs text-status-blocked-text">
-                    <AlertTriangle className="size-3" /> No API key — agents get no Composio tools
+                    <AlertTriangle className="size-3" /> No API key — agents get
+                    no Composio tools
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-                    <KeyRound className="size-3" /> Using this company&apos;s own Composio account
+                    <KeyRound className="size-3" /> Using this company&apos;s
+                    own Composio account
                   </span>
                 )
               ) : attested ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-                  <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
+                  <ShieldCheck className="size-3" /> Linked via cluster identity
+                  — nothing stored
                 </span>
               ) : companyKey ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
-                  <ShieldCheck className="size-3" /> Linked via this company&apos;s own credential
+                  <ShieldCheck className="size-3" /> Linked via this
+                  company&apos;s own credential
                 </span>
               ) : byoToken ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <Check className="size-3" /> token set
                 </span>
               ) : (
-                <span className="text-xs text-muted-foreground">not connected</span>
+                <span className="text-xs text-muted-foreground">
+                  not connected
+                </span>
               )}
             </div>
           )}
@@ -542,13 +587,16 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     `policy-settings` uses for approval tiers, roving tabindex
                     included. */}
                 {MODE_ORDER.length > 1 && (
-                <div
-                  role="radiogroup"
-                  aria-label="Which Composio account this company uses"
-                  className={cn("grid gap-2", MODE_ORDER.length > 1 && "sm:grid-cols-2")}
-                  onKeyDown={handleModeKeyDown}
-                >
-                  {/* A stored route the list does not offer still gets a tile.
+                  <div
+                    role="radiogroup"
+                    aria-label="Which Composio account this company uses"
+                    className={cn(
+                      "grid gap-2",
+                      MODE_ORDER.length > 1 && "sm:grid-cols-2",
+                    )}
+                    onKeyDown={handleModeKeyDown}
+                  >
+                    {/* A stored route the list does not offer still gets a tile.
                       Without one no radio in the group is checked — every tile
                       reports `aria-checked="false"` and the control claims the
                       company has chosen nothing, which is a different (and
@@ -556,64 +604,72 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
 
                       Disabled: it is the state the company is in, not a route to
                       go back to. */}
-                  {!isOffered(mode) && (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked
-                      tabIndex={0}
-                      disabled
-                      data-testid="composio-mode-unconfigured"
-                      className="rounded-md border border-primary bg-primary/5 p-3 text-left disabled:cursor-not-allowed"
-                    >
-                      <span className="text-sm font-medium">{NOT_CONFIGURED}</span>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        No Composio account is configured for this company. Add an API key below to
-                        connect one.
-                      </p>
-                    </button>
-                  )}
-                  {MODE_ORDER.map((m, index) => {
-                    const active = mode === m;
-                    return (
+                    {!isOffered(mode) && (
                       <button
-                        key={m}
-                        ref={(el) => {
-                          modeButtons.current[index] = el;
-                        }}
                         type="button"
                         role="radio"
-                        aria-checked={active}
-                        tabIndex={active ? 0 : -1}
-                        disabled={busy !== null}
-                        data-testid={`composio-mode-${m}`}
-                        onClick={() => {
-                          setMode(m);
-                          setConfirmSwitch(false);
-                        }}
-                        className={cn(
-                          "rounded-md border p-3 text-left transition-colors",
-                          "disabled:cursor-not-allowed disabled:opacity-60",
-                          active ? "border-primary bg-primary/5" : "hover:bg-muted/50",
-                        )}
+                        aria-checked
+                        tabIndex={0}
+                        disabled
+                        data-testid="composio-mode-unconfigured"
+                        className="rounded-md border border-primary bg-primary/5 p-3 text-left disabled:cursor-not-allowed"
                       >
-                        <div className="flex items-start gap-2">
-                          <span className="flex-1 text-sm font-medium">{MODES[m].label}</span>
-                          {persistedMode === m && (
-                            <Badge variant="secondary" className="text-xs">
-                              Current
-                            </Badge>
-                          )}
-                        </div>
-                        <p className="mt-1 text-xs text-muted-foreground">{MODES[m].blurb}</p>
-                        <p className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
-                          <Wallet className="size-3 shrink-0" />
-                          {MODES[m].billed}
+                        <span className="text-sm font-medium">
+                          {NOT_CONFIGURED}
+                        </span>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          No Composio account is configured for this company.
+                          Add an API key below to connect one.
                         </p>
                       </button>
-                    );
-                  })}
-                </div>
+                    )}
+                    {MODE_ORDER.map((m, index) => {
+                      const active = mode === m;
+                      return (
+                        <button
+                          key={m}
+                          ref={(el) => {
+                            modeButtons.current[index] = el;
+                          }}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          tabIndex={active ? 0 : -1}
+                          disabled={busy !== null}
+                          data-testid={`composio-mode-${m}`}
+                          onClick={() => {
+                            setMode(m);
+                            setConfirmSwitch(false);
+                          }}
+                          className={cn(
+                            "rounded-md border p-3 text-left transition-colors",
+                            "disabled:cursor-not-allowed disabled:opacity-60",
+                            active
+                              ? "border-primary bg-primary/5"
+                              : "hover:bg-muted/50",
+                          )}
+                        >
+                          <div className="flex items-start gap-2">
+                            <span className="flex-1 text-sm font-medium">
+                              {MODES[m].label}
+                            </span>
+                            {persistedMode === m && (
+                              <Badge variant="secondary" className="text-xs">
+                                Current
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {MODES[m].blurb}
+                          </p>
+                          <p className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
+                            <Wallet className="size-3 shrink-0" />
+                            {MODES[m].billed}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
                 )}
 
                 {/* The endpoint, so the routing claim above is checkable rather
@@ -635,14 +691,34 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       id="composio-api-key"
                       type="password"
                       autoComplete="off"
-                      placeholder={onByok ? "stored — paste a new key to rotate" : "ak_…"}
+                      placeholder={
+                        onByok ? "stored — paste a new key to rotate" : "ak_…"
+                      }
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      From your Composio dashboard at app.composio.dev. Stored on this host, never
-                      shown again.
+                      From your Composio dashboard at app.composio.dev. Stored
+                      on this host, never shown again.
                     </p>
+                    {/* The dashboard the line above names, as somewhere to go
+                        rather than an address to retype. Deliberately the bare
+                        host from that copy and not a guessed deep link: a
+                        settings path that moves leaves the operator on a 404
+                        after a sign-in that worked. */}
+                    <a
+                      href={COMPOSIO_DASHBOARD_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      data-testid="composio-open-dashboard"
+                      className={cn(
+                        buttonVariants({ variant: "outline", size: "sm" }),
+                        "mt-1",
+                      )}
+                    >
+                      Open Composio dashboard
+                      <ExternalLink className="size-3.5" />
+                    </a>
                   </div>
                 )}
 
@@ -662,9 +738,10 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       Providers connected before this stay where they are
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      They live in the Composio account this company reached before, not in this
-                      one, so the grid below will look empty until you connect them again here.
-                      Clearing the key puts this company back where it is now.
+                      They live in the Composio account this company reached
+                      before, not in this one, so the grid below will look empty
+                      until you connect them again here. Clearing the key puts
+                      this company back where it is now.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       <Button
@@ -731,7 +808,10 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                       </>
                     ) : (
                       onByok && (
-                        <Button disabled={busy !== null} onClick={() => void clearApiKey()}>
+                        <Button
+                          disabled={busy !== null}
+                          onClick={() => void clearApiKey()}
+                        >
                           {busy === "route" ? (
                             <Loader2 className="size-4 animate-spin" />
                           ) : (
@@ -755,7 +835,11 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
               alone left a company-key admin with the paste card hidden and no
               control to reveal it — the override became unreachable. */}
           {canManage && !onByok && credentialed && !showTokenCard && (
-            <Button variant="outline" size="sm" onClick={() => setShowOverride(true)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowOverride(true)}
+            >
               <KeyRound className="size-4" />
               Use your own Composio account instead
             </Button>
@@ -771,21 +855,24 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     would describe a fallback it does not have. */}
                 {companyKey ? (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    Optional. This company&apos;s own TinyHumans credential already authorizes
-                    Composio. A token set here replaces it for Composio only — use it when the
-                    company has a separate Composio account. Clear it to go back to the company
+                    Optional. This company&apos;s own TinyHumans credential
+                    already authorizes Composio. A token set here replaces it
+                    for Composio only — use it when the company has a separate
+                    Composio account. Clear it to go back to the company
                     credential.
                   </p>
                 ) : attested ? (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    Optional. A token set here overrides the instance identity for this company only
-                    — use it when the company has its own Composio account. Clear it to go back to
-                    the cluster identity.
+                    Optional. A token set here overrides the instance identity
+                    for this company only — use it when the company has its own
+                    Composio account. Clear it to go back to the cluster
+                    identity.
                   </p>
                 ) : null}
                 <div className="space-y-1">
                   <Label htmlFor="composio-token" className="text-xs">
-                    Composio token {byoToken ? "— set (paste a new value to rotate)" : ""}
+                    Composio token{" "}
+                    {byoToken ? "— set (paste a new value to rotate)" : ""}
                   </Label>
                   <Input
                     id="composio-token"
@@ -796,12 +883,17 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     onChange={(e) => setToken(e.target.value)}
                   />
                   {status && isOffered(persistedMode) && (
-                    <p className="truncate text-xs text-muted-foreground">{status.backendUrl}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {status.backendUrl}
+                    </p>
                   )}
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button disabled={busy !== null || !token.trim()} onClick={() => void save()}>
+                  <Button
+                    disabled={busy !== null || !token.trim()}
+                    onClick={() => void save()}
+                  >
                     {busy === "save" ? (
                       <Loader2 className="size-4 animate-spin" />
                     ) : (
@@ -810,7 +902,11 @@ export function ComposioSection({ client, company, canManage, onChanged }: Props
                     Save token
                   </Button>
                   {byoToken && (
-                    <Button variant="outline" disabled={busy !== null} onClick={() => void clear()}>
+                    <Button
+                      variant="outline"
+                      disabled={busy !== null}
+                      onClick={() => void clear()}
+                    >
                       {busy === "clear" ? (
                         <Loader2 className="size-4 animate-spin" />
                       ) : (

@@ -62,7 +62,12 @@ const MAX_OUTPUT_TOKENS: u32 = 24;
 /// operator who sends the same question twice should not watch it land on two
 /// different teammates. Unlike triage there is no upstream setting to honour,
 /// so this is zero rather than near-zero.
-const TEMPERATURE: f64 = 0.0;
+///
+/// The shared constant rather than a local `0.0`: it is what
+/// `Sampling::from_request` reads back as an *intent*, so this workload also
+/// gets `seed` where the model supports one, and degrades rather than 400s on a
+/// model that forbids a temperature outright.
+const TEMPERATURE: f64 = crate::company::inference::dialect::DETERMINISTIC;
 
 /// One channel member as the selector sees it: the id it must answer with and
 /// the role/description it judges fit by — the same fields the console's

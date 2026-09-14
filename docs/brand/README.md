@@ -239,7 +239,7 @@ fringes outside the mask.
 **These three SVGs are the authority.** Every raster the repository ships is
 generated from them by `scripts/brand/generate-icons.sh` — the favicon set and
 web manifest icons in `frontend/public/`, and the full desktop bundle set in
-`src-tauri/icons/`. Change a source and re-run the script; never hand-edit a
+`crates/opencompany-app/icons/`. Change a source and re-run the script; never hand-edit a
 generated PNG, or the set drifts apart one file at a time.
 
 > **Status:** the wordmark still has no vector asset — it remains type-set in

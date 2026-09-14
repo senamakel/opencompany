@@ -1424,7 +1424,9 @@ mod tests {
     /// the siblings keeps the coupling honest across a split: what these tests
     /// pin is the needle, not the file it lives in.
     fn vendored(relative: &str) -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative);
         let mut all = read_vendored(&path, relative);
         if let (Some(dir), Some(stem)) = (path.parent(), path.file_stem()) {
             let prefix = format!("{}_part_", stem.to_string_lossy());

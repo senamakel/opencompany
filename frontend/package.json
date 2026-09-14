@@ -1,7 +1,7 @@
 {
   "name": "opencompany-console",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.6",
   "description": "A company-agnostic operator console for any OpenCompany host, built with Vite + React.",
   "type": "module",
   "engines": {
@@ -27,7 +27,7 @@
     "e2e:visual": "PW_VISUAL=1 playwright test",
     "e2e:visual:update": "PW_VISUAL=1 playwright test --update-snapshots",
     "tauri:dev": "../scripts/desktop-dev.sh",
-    "tauri:build": "npm run build && cd ../src-tauri && ../frontend/node_modules/.bin/tauri build -- --features opencompany/acp,opencompany/composio"
+    "tauri:build": "npm run build && cd ../crates/opencompany-app && ../../frontend/node_modules/.bin/tauri build -- --features opencompany-core/acp,opencompany-core/composio"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

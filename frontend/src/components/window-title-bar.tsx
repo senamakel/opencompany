@@ -42,7 +42,7 @@ import { cn } from "@/lib/utils";
  * What the row drops as the window narrows — decided here, once, rather than by
  * each item picking its own breakpoint.
  *
- * The window's `minWidth` is 880 (`src-tauri/tauri.conf.json`) and the row's
+ * The window's `minWidth` is 880 (`crates/opencompany-app/tauri.conf.json`) and the row's
  * contents do not fit there at their widest, so something has to go. What made
  * that a design problem rather than an arithmetic one is that every item can
  * make a locally reasonable case for surviving; the order below is the answer,
