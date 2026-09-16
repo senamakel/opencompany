@@ -8283,7 +8283,7 @@ version = "0.1.2"
 
 [[patch.unused]]
 name = "tinycortex"
-version = "0.1.2"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "tinycortex-api"
