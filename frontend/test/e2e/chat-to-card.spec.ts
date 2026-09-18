@@ -198,7 +198,10 @@ test("a card raised inside a thread opens that thread on the jump back, not just
 
   const card = await taskMatching(
     request,
-    (task) => task.originChatId === channel && !taskIdsBeforeReply.has(task.id),
+    (task) =>
+      task.originChatId === channel &&
+      !taskIdsBeforeReply.has(task.id) &&
+      task.title.includes(String(marker)),
   );
 
   await page.goto(`/#/company/tasks/${card!.id}`);

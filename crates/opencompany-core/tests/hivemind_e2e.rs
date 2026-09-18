@@ -649,7 +649,9 @@ async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards(
                 _ => Reply::Say("done".to_string()),
             };
         }
-        if user.contains("@greeter sent you this direct message") {
+        if user.contains("Check the launch argument")
+            || user.contains("Check the launch implementation")
+        {
             if ask.pending_tool.is_some() {
                 return Reply::Say("done".to_string());
             }

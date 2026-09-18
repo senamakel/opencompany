@@ -189,6 +189,23 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.tool_calls).toBeUndefined();
   });
 
+  it("uses the current SPAWNONE directive and leaves matching text in the task alone", async () => {
+    const marker = `current-${Date.now()}`;
+    const reply = await chat([
+      {
+        role: "user",
+        content:
+          "## Relevant prior work\n- old request SPAWNONE old-marker\n\n## Task\n" +
+          `please explain the heading ## Task and track ${marker} SPAWNONE ${marker}`,
+      },
+    ]);
+
+    const call = reply.choices[0].message.tool_calls?.[0];
+    expect(call?.function?.name).toBe("spawn_task");
+    expect(JSON.parse(call.function.arguments).title).toContain(marker);
+    expect(JSON.parse(call.function.arguments).title).not.toContain("old-marker");
+  });
+
   it("emits the exact tool call a __MOCK_TOOL_CALL__ directive names", async () => {
     const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
       name: "mcp_call_tool",

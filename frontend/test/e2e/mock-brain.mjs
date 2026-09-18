@@ -437,10 +437,11 @@ function readJsonValue(text, from, open, close) {
  *
  * @param {string} text
  * @param {string} needle
+ * @param {number} [start]
  * @returns {string}
  */
-function titleFrom(text, needle) {
-  const at = text.indexOf(needle);
+function titleFrom(text, needle, start = 0) {
+  const at = text.indexOf(needle, start);
   if (at < 0) return "Mock spawned task";
   const lineStart = text.lastIndexOf("\n", at) + 1;
   const lineEnd = text.indexOf("\n", at);
@@ -475,11 +476,17 @@ function instructionText(message) {
   // The channel briefing is appended after the operator's actual sentence.
   // It deliberately says it is reference-only, and can quote a prior
   // SPAWNONE verbatim. Never let that quote become a fresh tool instruction.
-  const withoutChannelBriefing = message.split("[Other conversations in this channel, for reference only")[0];
+  const channelBriefing =
+    /^\[Other conversations in this channel, for reference only — do NOT read or answer from them unless this message explicitly refers to one\]:\r?$/m.exec(
+      message,
+    );
+  const withoutChannelBriefing = channelBriefing
+    ? message.slice(0, channelBriefing.index)
+    : message;
   // Memory uses the same separation in the other direction: its digest comes
   // before the task. Allow either LF or CRLF, since providers do not preserve
   // the host's line-ending convention.
-  const task = /## Task\s*/g;
+  const task = /^## Task[ \t]*(?:\r?\n|$)/gm;
   let match;
   let taskEnd = -1;
   while ((match = task.exec(withoutChannelBriefing)) !== null) taskEnd = task.lastIndex;
@@ -530,7 +537,7 @@ function findDirective(messages) {
         index: i,
         id,
         name: "spawn_task",
-        arguments: { title: titleFrom(text, SPAWN_DIRECTIVE) },
+        arguments: { title: titleFrom(text, SPAWN_DIRECTIVE, spawnAt) },
       };
     }
   }
