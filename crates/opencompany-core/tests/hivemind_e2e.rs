@@ -678,14 +678,15 @@ async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards(
     assert!(response["responses"].is_array(), "{response}");
 
     for recipient in [THEORIST, PROGRAMMER] {
-        let dm = replies(&runtime, recipient).await;
+        let conversation = opencompany::hivemind::referral::pair_conversation("greeter", recipient);
+        let dm = replies(&runtime, &conversation).await;
         assert!(
             dm.iter().any(|(_, author, _)| author == "greeter"),
-            "the outbound DM must be in {recipient}'s transcript: {dm:?}"
+            "the outbound DM must be in the private {conversation} transcript: {dm:?}"
         );
         assert!(
             dm.iter()
-                .any(|(_, author, text)| author == recipient && text == "Checked and ready."),
+                .any(|(_, author, text)| author == recipient && text == "Acknowledged."),
             "the recipient's tool-call reply must return to the same DM: {dm:?}"
         );
     }
