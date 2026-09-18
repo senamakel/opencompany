@@ -7,6 +7,8 @@ use crate::app::config::MapEnv;
 /// and the one Groq rewrites to `1e-8`. Nothing may appear at all.
 #[test]
 fn no_opinion_puts_no_sampling_field_on_the_wire() {
+    let env = crate::test_support::EnvVarGuard::capture(&["OPENCOMPANY_INFERENCE_MAX_TOKENS"]);
+    env.remove("OPENCOMPANY_INFERENCE_MAX_TOKENS");
     let mut body = serde_json::json!({ "model": "claude-sonnet-5" });
     let sent = apply_sampling(
         &mut body,
