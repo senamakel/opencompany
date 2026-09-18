@@ -755,6 +755,10 @@ impl tinyhivemind::referral::ReferralQueue for JournalReferralQueue {
                         ),
                         trigger_sequence: referral.key.trigger_sequence,
                         answers,
+                        // The exchange rows are only known after the child turn
+                        // runs; the history fold retains its forward-scan
+                        // fallback for this marker.
+                        rows: None,
                         to_desk: referral.to.desk_id.clone(),
                         target: referral.target_id.clone(),
                     },
