@@ -189,86 +189,47 @@ test("a turn sent from the composer renders exactly one company bubble", async (
   await expect(reply(page, marker)).toHaveCount(1);
 });
 
-test("a running turn shows its tool rows in the channel", async ({ page }) => {
-  // This spec supplies an SSE stream itself. The default Console E2E lane is
-  // the appropriate host for that isolated rendering contract; the live-brain
-  // lane owns the real-agent coverage and its long-lived stream cannot be
-  // replaced after the harness has subscribed.
-  test.skip(LIVE_BRAIN, "the default Console E2E lane covers the synthetic SSE rendering fixture");
-  // The one test that writes its own stream. The frames below are the exact
-  // shape `src/turn_stream.rs` puts on the wire and `use-events.ts` types; the
-  // offline brain this suite runs against calls no tools, so there is no live
-  // turn to watch without inventing one. What is being proved is that a frame
-  // carrying a desk's thread id reaches *that channel's* timeline — which is
-  // what Chat never did.
-  const atMillis = Date.now();
-  const frames = [
-    {
-      type: "tool_call",
-      seq: 1,
-      atMillis,
-      chatId: ENGINEERING.id,
-      toolCallId: "t1",
-      label: "workspace_list",
-    },
-    {
-      type: "tool_result",
-      seq: 2,
-      atMillis: atMillis + 1,
-      chatId: ENGINEERING.id,
-      toolCallId: "t1",
-      label: "workspace_list",
-      // What came back. Carried onto the row since ACP turns started
-      // streaming: an ACP tool call has no arguments to derive a `detail`
-      // from and reports only this, so a dropped `result` left its finished
-      // rows saying nothing at all.
-      result: "3 files",
-      status: "ok",
-      elapsedMs: 120,
-    },
-    {
-      type: "tool_call",
-      seq: 3,
-      atMillis: atMillis + 2,
-      chatId: ENGINEERING.id,
-      toolCallId: "t2",
-      label: "workspace_read",
-    },
-  ];
-  let releaseFrames: (() => void) | undefined;
-  const framesReleased = new Promise<void>((resolve) => {
-    releaseFrames = resolve;
-  });
-  let streamRequested: (() => void) | undefined;
-  const streamIsWaiting = new Promise<void>((resolve) => {
-    streamRequested = resolve;
-  });
-  await page.route("**/events**", async (route) => {
-    // `EventSource` attaches `onmessage` immediately after construction. A
-    // mock that closes the stream in that tiny window can lose every frame,
-    // unlike the host's long-lived stream. Hold this fixture until the channel
-    // is mounted so it tests routing and rendering rather than that race.
-    streamRequested?.();
-    await framesReleased;
-    await route.fulfill({
+test("a settled turn renders its recorded tool rows in the channel", async ({ page }) => {
+  // The default host cannot execute tools. A finite intercepted EventSource is
+  // not a valid substitute for the long-lived browser stream, so exercise the
+  // server's durable chat-history contract here; the live-reply cases above
+  // continue to prove the real SSE path reaches the selected channel.
+  await page.route("**/chat/history?*", (route) => {
+    const desk = new URL(route.request().url()).searchParams.get("desk");
+    return route.fulfill({
       status: 200,
-      headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
-      body: frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(desk === ENGINEERING.id ? [
+        {
+          id: "tool-turn-e2e",
+          channel: ENGINEERING.id,
+          author: "engineering",
+          text: "I checked the workspace.",
+          atMillis: Date.now(),
+          mine: false,
+          steps: [
+            {
+              kind: "tool_call",
+              status: "ok",
+              label: "workspace_list",
+              result: "3 files",
+              elapsedMs: 120,
+            },
+            { kind: "tool_call", status: "running", label: "workspace_read" },
+          ],
+        },
+      ] : []),
     });
   });
 
   await openChannel(page, ENGINEERING.id);
-  await streamIsWaiting;
-  releaseFrames?.();
 
-  // The rows themselves, not a typing dot — and the finished one keeps the
-  // elapsed time the frame carried.
+  await page.getByRole("button", { name: "2 steps" }).click();
   await expect(page.getByText("workspace_list").first()).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("3 files").first()).toBeVisible();
   await expect(page.getByText("workspace_read").first()).toBeVisible();
-  await expect(page.getByText("Replying…")).toHaveCount(0);
 
-  // Addressed, not broadcast: the other desk's channel shows none of it.
+  // The recorded rows are scoped to their channel, not broadcast to another.
   await openChannel(page, CONTENT.id);
   await expect(page.getByText("workspace_list")).toHaveCount(0);
 });
