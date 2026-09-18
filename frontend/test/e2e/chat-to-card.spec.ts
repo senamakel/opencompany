@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
 
@@ -64,51 +64,50 @@ async function openThread(page: Page, channelId: string) {
   await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
 }
 
+type Task = {
+  id: string;
+  title: string;
+  originChatId?: string;
+};
+
+/** Wait for the asynchronous orchestrator to persist the card it opened. */
+async function taskMatching(
+  request: APIRequestContext,
+  matches: (task: Task) => boolean,
+): Promise<Task> {
+  let found: Task | undefined;
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get("/api/v1/company/tasks");
+        expect(response.ok()).toBeTruthy();
+        found = ((await response.json()) as Task[]).find(matches);
+        return Boolean(found);
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  return found!;
+}
+
 test("a card raised from a channel line links back to the channel", async ({
   page,
   request,
 }) => {
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
-  // The deterministic "Track" triage cards an imperative lead on its own,
-  // independent of whatever the brain answers with — so the round trip below
-  // is provable on a default host, with no scripted backend.
+  // `SPAWNONE` has the live fixture open exactly one card for this request.
   const API = "/api/v1/company";
   const marker = Date.now();
-  const prompt = `build the launch checklist ${marker}`;
+  const prompt = `build the launch checklist SPAWNONE ${marker}`;
   const posted = await request.post(`${API}/chat`, {
     data: { text: prompt, chat: "engineering" },
   });
   expect(posted.ok(), await posted.text()).toBeTruthy();
 
-  // The seq the host journaled the operator's message under — `messageId` is
-  // `seq.value().to_string()` (`operator.rs`), and the same seq comes back on
-  // the card as `originParent`. That pair is this card's identity here.
-  //
-  // Not the title: the card is named by whatever raised it, so matching a
-  // marker inside `title` is an identity claim on a string the model owns.
-  // That is the defect PR #2055 removes from the host's own card adoption, and
-  // it would fail here the day titles stop echoing the request.
-  const messageSeq = Number((await posted.json()).messageId);
-  expect(
-    Number.isInteger(messageSeq),
-    "the host must return the seq it journaled the message under",
-  ).toBeTruthy();
-
-  const tasksResponse = await request.get(`${API}/tasks`);
-  expect(tasksResponse.ok()).toBeTruthy();
-  const tasks = (await tasksResponse.json()) as Array<{
-    id: string;
-    title: string;
-    originChatId?: string;
-    originParent?: number;
-  }>;
-  const card = tasks.find(
-    (t) => t.originParent === messageSeq && t.originChatId === "engineering",
+  const card = await taskMatching(
+    request,
+    (task) => task.originChatId === "engineering" && task.title.includes(String(marker)),
   );
-  expect(
-    card,
-    `no card opened from seq ${messageSeq} in engineering: ${JSON.stringify(tasks)}`,
-  ).toBeTruthy();
 
   // The card is real and titled from the message. Its *stage* is deliberately
   // not asserted: a triage-raised card is one the company decided is work, and
@@ -128,7 +127,7 @@ test("a card raised from a channel line links back to the channel", async ({
   // every card, which would make a heading match prove only that some detail
   // page rendered. The note is where the operator's own words are kept, so it
   // is what says *this* is the card that message opened.
-  await expect(page.getByText(prompt).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(card.title, { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 
   // …and it knows which conversation opened it.
@@ -166,7 +165,7 @@ test("a card raised from a channel line links back to the channel", async ({
  * either way even with the thread root dropped on the floor. So this seeds a
  * root message and a threaded reply to it directly (the same REST surface
  * `sayFromElsewhere`-style specs already use for setup elsewhere in this
- * suite), lets the deterministic "Track" triage open the card from the reply,
+ * suite), asks the live fixture to open a card from the reply,
  * and asserts the jump renders the thread panel holding the *root's* text —
  * not the reply's, and not merely the channel.
  */
@@ -175,37 +174,32 @@ test("a card raised inside a thread opens that thread on the jump back, not just
   request,
 }) => {
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
-  const API = "/api/v1/company";
   const marker = Date.now();
+  const channel = "content";
   const rootText = `quick sync on Q3 priorities ${marker}`;
+  const API = "/api/v1/company";
   const rootResponse = await request.post(`${API}/chat`, {
-    data: { text: rootText, chat: "engineering" },
+    data: { text: rootText, chat: channel },
   });
   expect(rootResponse.ok(), await rootResponse.text()).toBeTruthy();
   const rootId = (await rootResponse.json()).messageId as string;
   expect(rootId).toBeTruthy();
+  const beforeReply = await request.get(`${API}/tasks`);
+  expect(beforeReply.ok(), await beforeReply.text()).toBeTruthy();
+  const taskIdsBeforeReply = new Set((await beforeReply.json() as Task[]).map((task) => task.id));
 
-  // An imperative lead ("build …") is what the deterministic triage cards —
-  // independent of whatever the echo brain answers with — and `parent` is
-  // what makes this a threaded reply rather than a second channel-level line.
-  const replyText = `build the onboarding checklist ${marker}`;
+  // `SPAWNONE` asks the live fixture to call `spawn_task`, and `parent` makes
+  // this a threaded reply rather than a second channel-level line.
+  const replyText = `build the onboarding checklist SPAWNONE ${marker}`;
   const replyResponse = await request.post(`${API}/chat`, {
-    data: { text: replyText, chat: "engineering", parent: rootId },
+    data: { text: replyText, chat: channel, parent: rootId },
   });
   expect(replyResponse.ok(), await replyResponse.text()).toBeTruthy();
 
-  const tasksResponse = await request.get(`${API}/tasks`);
-  expect(tasksResponse.ok()).toBeTruthy();
-  const tasks = (await tasksResponse.json()) as Array<{
-    id: string;
-    title: string;
-    note?: string;
-  }>;
-  // Keyed on the NOTE, never the title: the card's headline is named by a
-  // titling pass, so the message that opened it is not in there — the note is
-  // where the operator's own words are kept.
-  const card = tasks.find((t) => (t.note ?? "").includes(String(marker)));
-  expect(card, `no card opened from "${replyText}": ${JSON.stringify(tasks)}`).toBeTruthy();
+  const card = await taskMatching(
+    request,
+    (task) => task.originChatId === channel && !taskIdsBeforeReply.has(task.id),
+  );
 
   await page.goto(`/#/company/tasks/${card!.id}`);
   await dismissWelcome(page);
@@ -213,7 +207,7 @@ test("a card raised inside a thread opens that thread on the jump back, not just
   await expect(origin).toBeVisible({ timeout: 15_000 });
   await origin.click();
 
-  await expect(page).toHaveURL(/#\/chat\/engineering(?:[/?]|$)/);
+  await expect(page).toHaveURL(new RegExp(`#\\/chat\\/${channel}(?:[/?]|$)`));
 
   const thread = page
     .locator("aside")

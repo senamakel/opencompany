@@ -190,6 +190,11 @@ test("a turn sent from the composer renders exactly one company bubble", async (
 });
 
 test("a running turn shows its tool rows in the channel", async ({ page }) => {
+  // This spec supplies an SSE stream itself. The default Console E2E lane is
+  // the appropriate host for that isolated rendering contract; the live-brain
+  // lane owns the real-agent coverage and its long-lived stream cannot be
+  // replaced after the harness has subscribed.
+  test.skip(LIVE_BRAIN, "the default Console E2E lane covers the synthetic SSE rendering fixture");
   // The one test that writes its own stream. The frames below are the exact
   // shape `src/turn_stream.rs` puts on the wire and `use-events.ts` types; the
   // offline brain this suite runs against calls no tools, so there is no live

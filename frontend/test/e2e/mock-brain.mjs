@@ -471,9 +471,31 @@ function titleFrom(text, needle) {
  * @param {any[]} messages
  * @returns {{index: number, id: string, name: string, arguments: any} | null}
  */
+function instructionText(message) {
+  // The channel briefing is appended after the operator's actual sentence.
+  // It deliberately says it is reference-only, and can quote a prior
+  // SPAWNONE verbatim. Never let that quote become a fresh tool instruction.
+  const withoutChannelBriefing = message.split("[Other conversations in this channel, for reference only")[0];
+  // Memory uses the same separation in the other direction: its digest comes
+  // before the task. Allow either LF or CRLF, since providers do not preserve
+  // the host's line-ending convention.
+  const task = /## Task\s*/g;
+  let match;
+  let taskEnd = -1;
+  while ((match = task.exec(withoutChannelBriefing)) !== null) taskEnd = task.lastIndex;
+  return taskEnd < 0 ? withoutChannelBriefing : withoutChannelBriefing.slice(taskEnd);
+}
+
 function findDirective(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const text = textOf(messages[i]);
+    const message = textOf(messages[i]);
+    // Memory prepends prior-work summaries to the actual instruction. Those
+    // summaries can repeat a directive from a finished turn; they are context,
+    // not a command for the turn now being answered. When the prompt has the
+    // host's task boundary, inspect only the operator-owned suffix. Direct
+    // fixture calls and the cross-agent wrapper intentionally have no boundary
+    // and retain their whole message as the instruction.
+    const text = instructionText(message);
     // Context augmentation can quote a prior directive in a truncated task
     // summary before the current complete directive. Search from the end so
     // the newest valid instruction wins; a malformed historical quote must not
@@ -491,7 +513,10 @@ function findDirective(messages) {
       }
       at = text.lastIndexOf(TOOL_CALL_DIRECTIVE, at - 1);
     }
-    const spawnAt = text.indexOf(SPAWN_DIRECTIVE);
+    // A channel summary can quote an earlier SPAWNONE before the operator's
+    // complete current instruction. Keep the same newest-wins rule used for
+    // explicit tool directives above.
+    const spawnAt = text.lastIndexOf(SPAWN_DIRECTIVE);
     if (spawnAt >= 0) {
       // Identity is the directive and what follows it on its line — NOT the
       // whole line, and not the message. One operator message reaches several
