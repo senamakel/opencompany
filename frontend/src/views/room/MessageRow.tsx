@@ -34,7 +34,6 @@ import {
   ReferralChip,
   AsideConversation,
   ReferralConversation,
-  StepTimeline,
 } from "./StepTimeline";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -461,7 +460,6 @@ export function MessageRow({
         {message.outputs && message.outputs.length > 0 && (
           <OutputLinkRow outputs={message.outputs} />
         )}
-        {!!message.steps?.length && <StepTimeline steps={message.steps} />}
         {!!liveSteps?.length && (
           <WorkingIndicator srLabel="Working…" steps={liveSteps} />
         )}

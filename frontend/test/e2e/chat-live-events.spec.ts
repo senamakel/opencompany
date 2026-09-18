@@ -189,11 +189,11 @@ test("a turn sent from the composer renders exactly one company bubble", async (
   await expect(reply(page, marker)).toHaveCount(1);
 });
 
-test("a settled turn renders its recorded tool rows in the channel", async ({ page }) => {
+test("a settled turn keeps its raw tool rows out of the channel", async ({ page }) => {
   // The default host cannot execute tools. A finite intercepted EventSource is
   // not a valid substitute for the long-lived browser stream, so exercise the
-  // server's durable chat-history contract here; the live-reply cases above
-  // continue to prove the real SSE path reaches the selected channel.
+  // server's durable chat-history contract here. Raw tool calls belong only in
+  // Raw turns; the live-reply cases above continue to prove SSE routing.
   await page.route("**/chat/history?*", (route) => {
     const desk = new URL(route.request().url()).searchParams.get("desk");
     return route.fulfill({
@@ -224,10 +224,9 @@ test("a settled turn renders its recorded tool rows in the channel", async ({ pa
 
   await openChannel(page, ENGINEERING.id);
 
-  await page.getByRole("button", { name: "2 steps" }).click();
-  await expect(page.getByText("workspace_list").first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("3 files").first()).toBeVisible();
-  await expect(page.getByText("workspace_read").first()).toBeVisible();
+  await expect(page.getByText("I checked the workspace.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("workspace_list")).toHaveCount(0);
+  await expect(page.getByText("workspace_read")).toHaveCount(0);
 
   // The recorded rows are scoped to their channel, not broadcast to another.
   await openChannel(page, CONTENT.id);
