@@ -67,7 +67,6 @@ async function openThread(page: Page, channelId: string) {
 type Task = {
   id: string;
   title: string;
-  note?: string;
   originChatId?: string;
   originParent?: number;
 };
@@ -114,7 +113,7 @@ test("a card raised from a channel line links back to the channel", async ({
     (task) =>
       task.originChatId === "engineering" &&
       !taskIdsBeforePost.has(task.id) &&
-      task.note?.includes(String(marker)) === true,
+      task.title.includes(String(marker)),
   );
 
   // The card is real and titled from the message. Its *stage* is deliberately
@@ -209,7 +208,7 @@ test("a card raised inside a thread opens that thread on the jump back, not just
     (task) =>
       task.originChatId === channel &&
       !taskIdsBeforeReply.has(task.id) &&
-      task.note?.includes(String(marker)) === true &&
+      task.title.includes(String(marker)) &&
       String(task.originParent) === rootId,
   );
 
