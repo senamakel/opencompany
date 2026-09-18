@@ -189,6 +189,17 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.tool_calls).toBeUndefined();
   });
 
+  it("does not treat an appended open-work briefing as the current task", async () => {
+    const reply = await chat([
+      {
+        role: "user",
+        content:
+          "quick status\n\n[Open work already handed to you: SPAWNONE old-open-work-marker]",
+      },
+    ]);
+    expect(reply.choices[0].message.tool_calls).toBeUndefined();
+  });
+
   it("uses the current SPAWNONE directive and leaves matching text in the task alone", async () => {
     const marker = `current-${Date.now()}`;
     const reply = await chat([

@@ -489,8 +489,9 @@ function instructionText(message) {
   const task = /^## Task[ \t]*(?:\r?\n|$)/gm;
   let match;
   let taskEnd = -1;
-  while ((match = task.exec(withoutChannelBriefing)) !== null) taskEnd = task.lastIndex;
-  return taskEnd < 0 ? withoutChannelBriefing : withoutChannelBriefing.slice(taskEnd);
+  const operatorText = specWords(withoutChannelBriefing);
+  while ((match = task.exec(operatorText)) !== null) taskEnd = task.lastIndex;
+  return taskEnd < 0 ? operatorText : operatorText.slice(taskEnd);
 }
 
 function findDirective(messages) {
