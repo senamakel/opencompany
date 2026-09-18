@@ -439,6 +439,9 @@ async fn the_stand_down_holds_even_when_the_handlers_card_cannot_be_found() {
     );
     let turn = fx
         .runner(&turns)
+        // The handler's explicit workflow intent is its durable stand-down
+        // signal even when its best-effort card write is absent from the store.
+        .requested(Some(crate::ports::types::MessageIntent::Workflow))
         .handle_operator_message("chief", "draft the launch plan for next quarter", None)
         .await
         .expect("operator message handled");

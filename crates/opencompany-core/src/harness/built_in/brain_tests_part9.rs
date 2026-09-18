@@ -442,7 +442,11 @@ async fn the_relay_turn_cannot_re_delegate() {
             request(vec![CompanyEvent::OperatorMessage {
                 mentions: Vec::new(),
                 parent: None,
-                text: "handle it".into(),
+                // A question keeps this test on the synchronous relay path:
+                // work-shaped input also opens a card, whose independent
+                // dispatch adds turns unrelated to the relay's forbidden
+                // second hand-off.
+                text: "why is the site down?".into(),
                 by: None,
                 chat: None,
                 deliverable: None,
