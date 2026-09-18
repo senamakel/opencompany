@@ -447,6 +447,7 @@ async fn the_stand_down_holds_even_when_the_handlers_card_cannot_be_found() {
         .expect("operator message handled");
     assert!(fx.cards().await.is_empty(), "no second card is opened");
     assert!(turn.spawned_task.is_none(), "and none is claimed");
+    assert_eq!(turn.reply, "relayed", "the handler still relays its answer");
 }
 
 /// …and the same thread stays quiet for a question, so a desk chat does not

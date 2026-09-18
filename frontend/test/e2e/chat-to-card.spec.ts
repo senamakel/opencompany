@@ -67,7 +67,9 @@ async function openThread(page: Page, channelId: string) {
 type Task = {
   id: string;
   title: string;
+  note?: string;
   originChatId?: string;
+  originParent?: number;
 };
 
 /** Wait for the asynchronous orchestrator to persist the card it opened. */
@@ -99,6 +101,9 @@ test("a card raised from a channel line links back to the channel", async ({
   const API = "/api/v1/company";
   const marker = Date.now();
   const prompt = `build the launch checklist SPAWNONE ${marker}`;
+  const beforePost = await request.get(`${API}/tasks`);
+  expect(beforePost.ok(), await beforePost.text()).toBeTruthy();
+  const taskIdsBeforePost = new Set((await beforePost.json() as Task[]).map((task) => task.id));
   const posted = await request.post(`${API}/chat`, {
     data: { text: prompt, chat: "engineering" },
   });
@@ -106,7 +111,7 @@ test("a card raised from a channel line links back to the channel", async ({
 
   const card = await taskMatching(
     request,
-    (task) => task.originChatId === "engineering" && task.title.includes(String(marker)),
+    (task) => !taskIdsBeforePost.has(task.id) && task.note?.includes(String(marker)) === true,
   );
 
   // The card is real and titled from the message. Its *stage* is deliberately
@@ -201,7 +206,8 @@ test("a card raised inside a thread opens that thread on the jump back, not just
     (task) =>
       task.originChatId === channel &&
       !taskIdsBeforeReply.has(task.id) &&
-      task.title.includes(String(marker)),
+      task.note?.includes(String(marker)) === true &&
+      String(task.originParent) === rootId,
   );
 
   await page.goto(`/#/company/tasks/${card!.id}`);
