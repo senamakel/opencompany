@@ -111,7 +111,10 @@ test("a card raised from a channel line links back to the channel", async ({
 
   const card = await taskMatching(
     request,
-    (task) => !taskIdsBeforePost.has(task.id) && task.note?.includes(String(marker)) === true,
+    (task) =>
+      task.originChatId === "engineering" &&
+      !taskIdsBeforePost.has(task.id) &&
+      task.note?.includes(String(marker)) === true,
   );
 
   // The card is real and titled from the message. Its *stage* is deliberately
