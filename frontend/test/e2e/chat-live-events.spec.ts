@@ -196,10 +196,11 @@ test("a settled turn keeps its raw tool rows out of the channel", async ({ page 
   // Raw turns; the live-reply cases above continue to prove SSE routing.
   await page.route("**/chat/history?*", (route) => {
     const desk = new URL(route.request().url()).searchParams.get("desk");
+    if (desk !== ENGINEERING.id) return route.continue();
     return route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(desk === ENGINEERING.id ? [
+      body: JSON.stringify([
         {
           id: "tool-turn-e2e",
           channel: ENGINEERING.id,
@@ -218,7 +219,7 @@ test("a settled turn keeps its raw tool rows out of the channel", async ({ page 
             { kind: "tool_call", status: "running", label: "workspace_read" },
           ],
         },
-      ] : []),
+      ]),
     });
   });
 
@@ -231,6 +232,7 @@ test("a settled turn keeps its raw tool rows out of the channel", async ({ page 
   // The recorded rows are scoped to their channel, not broadcast to another.
   await openChannel(page, CONTENT.id);
   await expect(page.getByText("workspace_list")).toHaveCount(0);
+  await expect(page.getByText("workspace_read")).toHaveCount(0);
 });
 
 /* -------------------------------------------------------------------------- *
