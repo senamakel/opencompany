@@ -88,6 +88,7 @@ async function taskMatching(
       { timeout: 15_000 },
     )
     .toBe(true);
+  if (!found) throw new Error("Timed out waiting for the orchestrator to persist its card");
   return found!;
 }
 
