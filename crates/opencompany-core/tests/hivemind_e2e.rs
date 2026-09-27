@@ -686,7 +686,7 @@ async fn one_agent_uses_speech_to_coordinate_multiple_dm_sessions_without_cards(
         );
         assert!(
             dm.iter()
-                .any(|(_, author, text)| author == recipient && text == "Acknowledged."),
+                .any(|(_, author, text)| author == recipient && text == "Checked and ready."),
             "the recipient's tool-call reply must return to the same DM: {dm:?}"
         );
     }
