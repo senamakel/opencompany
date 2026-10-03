@@ -212,10 +212,21 @@ test("assert-feature-lanes.sh reads the plan, and the plan has the bare default 
   assert.match(read("scripts/ci/lanes/lanes-plan.mjs"), /run: "cargo test --locked" \}/);
 });
 
-test("every lane the plan can start has a step in ci-lanes.yml", () => {
+test("every lane the plan can start has a step in BOTH ci-lanes.yml lane jobs", () => {
+  // One `Lane:` step in the ex63 job and one in the hosted `lanes` job: a lane
+  // missing from either runs in the background with no step reporting it.
   const yml = read(".github/workflows/ci-lanes.yml");
-  for (const lane of buildPlan({ profile: "hosted", areas: ALL }).lanes) {
-    assert.match(yml, new RegExp(`lanes\\.mjs --wait ${lane.name}\\b`), lane.name);
+  const job = (start, end) => yml.slice(yml.indexOf(start), yml.indexOf(end));
+  const jobs = {
+    ex63: job("\n  ex63:\n", "\n  lanes:\n"),
+    hosted: job("\n  lanes:\n", "\n  services-mail:\n"),
+  };
+  for (const [name, body] of Object.entries(jobs)) {
+    assert.ok(body.length > 0, `${name} job not found in ci-lanes.yml`);
+    for (const lane of buildPlan({ profile: "hosted", areas: ALL }).lanes) {
+      const wait = new RegExp(`lanes\\.mjs --wait ${lane.name}(?![\\w-])`, "g");
+      assert.equal((body.match(wait) ?? []).length, 1, `${name}: ${lane.name}`);
+    }
   }
 });
 
